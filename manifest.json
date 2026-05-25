@@ -1,0 +1,55 @@
+{
+  "manifest_version": 3,
+  "name": "Carsensor Tools",
+  "version": "1.0.0",
+  "description": "Carsensor/MotorGate copy-import tools and Carsensor quick replies.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "clipboardRead",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://script.google.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "auth.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://c-match.carsensor.net/vehicles/registBasicInfo/*",
+        "https://c-match.carsensor.net/vehicles/registrationList/*",
+        "https://c-match.carsensor.net/inquiry/reply/*",
+        "https://c-match.carsensor.net/inquiry/lumpSumReply/*",
+        "https://c-match.carsensor.net/login/*",
+        "https://motorgate.jp/*"
+      ],
+      "js": [
+        "src/constants.js",
+        "src/edit-page.js",
+        "src/list-search.js",
+        "src/clipboard-import.js",
+        "src/reply.js",
+        "src/app.js"
+      ],
+      "css": [
+        "style.css"
+      ]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "execute_search.js",
+        "images/*.jpg"
+      ],
+      "matches": [
+        "https://motorgate.jp/*"
+      ]
+    }
+  ]
+}

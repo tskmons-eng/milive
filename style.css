@@ -1,0 +1,303 @@
+/* Paste Button */
+#cs-autofill-btn {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  z-index: 9999;
+  padding: 10px 20px;
+  background-color: #ff6600;
+  /* Carsensor Orange-ish */
+  color: white;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-weight: bold;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+}
+
+#cs-autofill-btn:hover {
+  background-color: #e65c00;
+}
+
+/* Modal Overlay */
+#cs-autofill-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 10000;
+}
+
+/* Modal Content */
+#cs-autofill-modal-content {
+  background-color: white;
+  padding: 20px;
+  border-radius: 8px;
+  width: 80%;
+  max-width: 600px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  display: flex;
+  flex-direction: column;
+}
+
+#cs-autofill-modal h2 {
+  margin-top: 0;
+  color: #333;
+}
+
+#cs-autofill-source {
+  width: 100%;
+  height: 200px;
+  margin-bottom: 15px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 8px;
+  font-family: monospace;
+}
+
+.cs-autofill-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.cs-autofill-actions button {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+#cs-autofill-run {
+  background-color: #28a745;
+  color: white;
+}
+
+#cs-autofill-close {
+  background-color: #dc3545;
+  color: white;
+}
+
+/* Copy Button (MotorGate) */
+#cs-copy-btn {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 9999;
+  padding: 15px 30px;
+  background-color: #007bff;
+  /* Blue */
+  color: white;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-weight: bold;
+  font-size: 16px;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+  transition: background-color 0.2s;
+}
+
+/* Floating Menu Container */
+#cs-floating-menu {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cs-float-btn {
+  padding: 12px 24px;
+  color: white;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-weight: bold;
+  font-size: 14px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+  text-align: center;
+  transition: transform 0.1s;
+}
+
+.cs-float-btn:active {
+  transform: translateY(2px);
+}
+
+.cs-btn-copy {
+  background-color: #007bff;
+  /* Blue */
+}
+
+.cs-btn-copy:hover {
+  background-color: #0056b3;
+}
+
+.cs-btn-import {
+  background-color: #ff6600;
+  /* Orange */
+}
+
+.cs-btn-import:hover {
+  background-color: #e65c00;
+}
+
+.cs-btn-scroll {
+  background-color: #f8f9fa;
+  /* Light Gray */
+  color: #333;
+  border: 1px solid #ccc;
+  margin-top: 5px;
+  /* Separate visually */
+}
+
+.cs-btn-scroll:hover {
+  background-color: #e2e6ea;
+}
+
+/* Hide old modal stuff if not used, or keep for fallback */
+#cs-autofill-modal {
+  display: none;
+}
+
+/* Quick Search Menu */
+#cs-search-menu {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 9999;
+  background-color: rgba(255, 255, 255, 0.9);
+  padding: 10px;
+  border-radius: 8px;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+  border: 1px solid #ccc;
+}
+
+.cs-search-wrapper {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.cs-search-input {
+  padding: 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 14px;
+  width: 150px;
+}
+
+.cs-search-btn {
+  padding: 8px 16px;
+  background-color: #007bff;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: bold;
+}
+
+.cs-search-btn:hover {
+  background-color: #0056b3;
+}
+
+.cs-search-reset {
+  padding: 8px 12px;
+  background-color: #6c757d;
+  /* Gray */
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.cs-search-reset:hover {
+  background-color: #5a6268;
+}
+
+/* CarSensor Inquiry Reply Buttons */
+.cs-reply-container {
+  margin-bottom: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px;
+  background-color: #f8f9fa;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.cs-reply-btn {
+  padding: 6px 12px;
+  background-color: #007bff;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background-color 0.2s;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.cs-reply-btn:hover {
+  background-color: #0056b3;
+}
+
+.cs-reply-btn.danger {
+  background-color: #dc3545;
+}
+.cs-reply-btn.danger:hover {
+  background-color: #bd2130;
+}
+
+.cs-reply-btn.success {
+  background-color: #28a745;
+}
+.cs-reply-btn.success:hover {
+  background-color: #1e7e34;
+}
+
+.cs-reply-btn.warning {
+  background-color: #ffc107;
+  color: #212529;
+}
+.cs-reply-btn.warning:hover {
+  background-color: #d39e00;
+}
+
+.cs-reply-btn.primary {
+  background-color: #007bff;
+}
+
+.cs-reply-btn.info {
+  background-color: #17a2b8;
+}
+
+.cs-reply-btn.info:hover {
+  background-color: #117a8b;
+}
+
+.cs-reply-btn.secondary {
+  background-color: #6c757d;
+}
+
+.cs-reply-btn.secondary:hover {
+  background-color: #545b62;
+}
+
+.cs-reply-btn.light {
+  background-color: #f8f9fa;
+  color: #212529;
+  border: 1px solid #ced4da;
+}
+
+.cs-reply-btn.light:hover {
+  background-color: #e2e6ea;
+}

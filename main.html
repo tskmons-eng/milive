@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body {
+            width: 280px;
+            padding: 15px;
+            font-family: sans-serif;
+        }
+
+        h3 {
+            text-align: center;
+        }
+
+        .status {
+            color: #28a745;
+            font-weight: bold;
+            margin-bottom: 10px;
+            text-align: center;
+        }
+
+        label {
+            display: block;
+            margin-top: 10px;
+            font-size: 12px;
+            color: #555;
+        }
+
+        input {
+            box-sizing: border-box;
+            width: 100%;
+            padding: 7px;
+            margin-top: 4px;
+        }
+
+        button {
+            width: 100%;
+            padding: 8px 10px;
+            margin-top: 12px;
+            cursor: pointer;
+        }
+
+        #settings-message {
+            min-height: 18px;
+            margin-top: 8px;
+            font-size: 12px;
+            color: #28a745;
+            text-align: center;
+        }
+    </style>
+</head>
+
+<body>
+    <h3>Carsensor Auto</h3>
+    <div class="status">Authenticated</div>
+    <p id="email-display" style="font-size: 12px; color: #666;"></p>
+    <label for="login-id">Carsensor login ID</label>
+    <input id="login-id" autocomplete="username">
+    <label for="login-password">Carsensor password</label>
+    <input id="login-password" type="password" autocomplete="current-password">
+    <button id="save-settings">Save</button>
+    <div id="settings-message"></div>
+    <script src="main.js"></script>
+</body>
+
+</html>

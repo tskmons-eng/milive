@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { width: 300px; padding: 15px; font-family: sans-serif; }
+    h3 { margin-top: 0; color: #333; }
+    input { width: 100%; padding: 8px; margin-bottom: 10px; box-sizing: border-box; }
+    button { width: 100%; padding: 8px; background: #007bff; color: white; border: none; cursor: pointer; border-radius: 4px; }
+    button:hover { background: #0056b3; }
+    #msg { margin-top: 10px; font-size: 14px; color: #d9534f; }
+  </style>
+</head>
+<body>
+  <h3>認証が必要です</h3>
+  <p style="font-size: 13px; color: #666;">利用を続けるには許可されたメールアドレスを入力してください。</p>
+  <input id="email" type="email" placeholder="メールアドレス">
+  <button id="submit">確認</button>
+  <p id="msg"></p>
+
+  <script src="auth.js"></script>
+</body>
+</html>
