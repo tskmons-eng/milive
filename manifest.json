@@ -1,15 +1,20 @@
 {
   "manifest_version": 3,
-  "name": "Carsensor Tools",
-  "version": "1.0.0",
-  "description": "Carsensor/MotorGate copy-import tools and Carsensor quick replies.",
+  "name": "MLive Carsensor Tools",
+  "version": "1.1.0",
+  "description": "Merged MLive, Carsensor, MotorGate, Arai AA, and JU Navi workflow tools.",
   "permissions": [
     "activeTab",
     "scripting",
     "clipboardRead",
-    "storage"
+    "storage",
+    "downloads"
   ],
   "host_permissions": [
+    "https://member.mirive.co.jp/*",
+    "https://motorgate.jp/*",
+    "https://*.araiaa-net.jp/*",
+    "https://*.junavi.jp/*",
     "https://script.google.com/*"
   ],
   "background": {
@@ -39,6 +44,29 @@
       "css": [
         "style.css"
       ]
+    },
+    {
+      "matches": [
+        "https://member.mirive.co.jp/*",
+        "https://motorgate.jp/*",
+        "https://*.araiaa-net.jp/*",
+        "https://*.junavi.jp/*"
+      ],
+      "js": [
+        "src/mlive-linkifier.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://*.araiaa-net.jp/*"
+      ],
+      "js": [
+        "src/mlive-override.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
     }
   ],
   "web_accessible_resources": [

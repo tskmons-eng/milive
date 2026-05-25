@@ -4,13 +4,27 @@ const AUTH_INTERVAL_DAYS = 30;
 chrome.runtime.onStartup.addListener(checkAuth);
 chrome.runtime.onInstalled.addListener(checkAuth);
 
-// Message listener for auth.js (MV3 compatible)
+// Message listener for auth.js and content scripts (MV3 compatible)
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.type === "VERIFY_EMAIL") {
         verifyEmail(request.email).then(success => {
             sendResponse({ success });
         });
         return true; // Keep channel open for sendResponse
+    }
+
+    if (request.type === "download") {
+        chrome.downloads.download({
+            url: request.url,
+            filename: request.filename,
+            saveAs: false
+        }).then(id => {
+            sendResponse({ success: true, id });
+        }).catch(error => {
+            console.error("Download failed:", error);
+            sendResponse({ success: false, error: error.message });
+        });
+        return true;
     }
 });
 
