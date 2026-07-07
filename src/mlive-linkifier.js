@@ -713,6 +713,7 @@
             btn.style.borderRadius = "18px";
             btn.style.fontWeight = "700";
             btn.style.boxShadow = "0 2px 10px rgba(0,0,0,0.18)";
+            Object.assign(btn.style, adapter.launcherStyle || {});
             wrap.appendChild(btn);
         }
 
@@ -2199,7 +2200,8 @@
                 storageKey: JU_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: JU_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "ju-search-bridge-ui",
-                position: { right: "12px", bottom: "112px" },
+                position: { right: "12px", top: "84px" },
+                launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.ju,
                 targetModes: ["listing", "market"],
                 shouldInstall: shouldInstallJuSearchBridge,
