@@ -1646,6 +1646,9 @@
                     return;
                 }
 
+                if (typeof adapter.beforeRestore === "function") {
+                    adapter.beforeRestore(currentMode);
+                }
                 adapter.restoreCondition(condition, currentMode);
                 adapter.state.pendingApplied = true;
                 await chrome.storage.local.remove(adapter.pendingKey);
@@ -1804,10 +1807,31 @@
             }) || null;
         }
 
+        function findVisibleSearchBridgeButtonByText(text, root = document) {
+            const expected = normalizeSearchBridgeText(text);
+            const candidates = Array.from(root.querySelectorAll("button,input[type='button'],input[type='submit'],a"));
+
+            return candidates.find(el => {
+                const actual = normalizeSearchBridgeText(el.textContent || el.value || el.getAttribute("aria-label"));
+                return actual === expected && isSearchBridgeElementVisible(el);
+            }) || null;
+        }
+
+        function isSearchBridgeElementVisible(el) {
+            if (!el) return false;
+            return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+        }
+
+        function clickSearchBridgeElement(el) {
+            if (!el) return false;
+            el.click();
+            return true;
+        }
+
         // ===== Arai 検索条件ブリッジ =====
 
         function getAraiSearchBridgeMode() {
-            const path = location.pathname.toLowerCase();
+            const path = location.pathname.toLowerCase().replace(/\/+$/, "");
             const search = location.search.toLowerCase();
 
             if (path.endsWith("/01_search.html")) return "listing";
@@ -1886,10 +1910,57 @@
             return "";
         }
 
+        function activateAraiSearchBridgeConditionTab(mode) {
+            const tabId = mode === "market" ? "johoTab3" : "tbSearchTab5";
+            const tab = document.getElementById(tabId) ||
+                Array.from(document.querySelectorAll("a,button")).find(el => normalizeSearchBridgeText(el.textContent) === "条件指定");
+
+            if (isSearchBridgeElementVisible(tab)) {
+                tab.click();
+            }
+        }
+
+        function getVisibleAraiSearchButton(ids) {
+            for (const id of ids) {
+                const button = document.getElementById(id);
+                if (isSearchBridgeElementVisible(button)) return button;
+            }
+
+            return null;
+        }
+
+        function clickAraiVenueSearchIfReady() {
+            const venueButton = getVisibleAraiSearchButton(["btn_kaijo", "btKaijo_exe"]);
+            if (venueButton) return clickSearchBridgeElement(venueButton);
+
+            const venueArea = document.getElementById("tbKaijoList");
+            if (isSearchBridgeElementVisible(venueArea)) {
+                const searchButton = Array.from(venueArea.querySelectorAll("button,input[type='button'],input[type='submit'],a"))
+                    .find(el => isSearchBridgeElementVisible(el) && /検索|次へ/.test(normalizeSearchBridgeText(el.textContent || el.value)));
+                if (searchButton) return clickSearchBridgeElement(searchButton);
+            }
+
+            return false;
+        }
+
+        function scheduleAraiVenueSearchAttempts() {
+            [250, 800, 1600, 2600].forEach(delay => {
+                setTimeout(() => {
+                    clickAraiVenueSearchIfReady();
+                }, delay);
+            });
+        }
+
         function submitAraiSearchBridge() {
-            const button = document.getElementById("btKaijo_exe") || findSearchBridgeButtonByText("次へ");
-            if (button) {
-                button.click();
+            if (clickAraiVenueSearchIfReady()) return;
+
+            const conditionButton = getVisibleAraiSearchButton(["btSearch", "btKaijo_exe"]) ||
+                findVisibleSearchBridgeButtonByText("この条件で検索") ||
+                findVisibleSearchBridgeButtonByText("次へ");
+
+            if (isSearchBridgeElementVisible(conditionButton)) {
+                conditionButton.click();
+                scheduleAraiVenueSearchAttempts();
                 return;
             }
 
@@ -1913,9 +1984,10 @@
                 isSearchMode: isAraiSearchBridgeMode,
                 canSaveCurrent: () => isAraiSearchBridgeMode(getAraiSearchBridgeMode()) && document.querySelectorAll("input,select,textarea").length > 0,
                 collectCondition: collectAraiSearchBridgeCondition,
+                beforeRestore: activateAraiSearchBridgeConditionTab,
                 restoreCondition: restoreAraiSearchBridgeCondition,
                 getTargetUrl: getAraiSearchBridgeTargetUrl,
-                isRestoreReady: () => isAraiSearchBridgeMode(getAraiSearchBridgeMode()) && !!document.getElementById("btKaijo_exe"),
+                isRestoreReady: () => isAraiSearchBridgeMode(getAraiSearchBridgeMode()) && document.querySelectorAll("input,select,textarea").length > 0,
                 submitSearch: submitAraiSearchBridge
             };
         }
@@ -1928,10 +2000,29 @@
 
         // ===== JU 検索条件ブリッジ =====
 
+        function getNormalizedJuSearchBridgePath() {
+            return location.pathname.toLowerCase().replace(/\/+$/, "");
+        }
+
+        function getJuSearchBridgeModeFromForm(form) {
+            const id = String(form?.id || "");
+            const action = String(form?.action || "").toLowerCase();
+
+            if (id === "b5-Form" || /\/junaviweb\/carsearch(?:[/?#]|$)/i.test(action)) return "listing";
+            if (id === "b3-Form" || /\/junaviweb\/marketpricesearch(?:[/?#]|$)/i.test(action)) return "market";
+
+            return "";
+        }
+
         function getJuSearchBridgeMode() {
-            const path = location.pathname.toLowerCase();
+            const path = getNormalizedJuSearchBridgePath();
             if (path.endsWith("/junaviweb/carsearch")) return "listing";
             if (path.endsWith("/junaviweb/marketpricesearch")) return "market";
+
+            for (const form of Array.from(document.querySelectorAll("form"))) {
+                const mode = getJuSearchBridgeModeFromForm(form);
+                if (mode) return mode;
+            }
 
             return "";
         }
@@ -1950,15 +2041,25 @@
             return mode === "listing" || mode === "market";
         }
 
-        function getJuSearchBridgeForm() {
-            return document.querySelector("#b5-Form") || document.querySelector("#b3-Form");
+        function getJuSearchBridgeForm(mode = "") {
+            const forms = Array.from(document.querySelectorAll("form"));
+            const exact = document.querySelector("#b5-Form") || document.querySelector("#b3-Form");
+            if (!mode && exact) return exact;
+
+            const targetMode = mode || getJuSearchBridgeMode();
+            if (targetMode) {
+                const byMode = forms.find(form => getJuSearchBridgeModeFromForm(form) === targetMode);
+                if (byMode) return byMode;
+            }
+
+            return exact || forms.find(form => /^b\d+-Form$/.test(form.id || "")) || forms[0] || null;
         }
 
         function shouldInstallJuSearchBridge() {
             const mode = getJuSearchBridgeMode();
             if (isJuSearchBridgeMode(mode)) return true;
 
-            const path = location.pathname.toLowerCase();
+            const path = getNormalizedJuSearchBridgePath();
             return path.includes("/junaviweb/") &&
                 !path.endsWith("/junaviweb/top") &&
                 /(search|marketprice|detail|list)/i.test(path);
@@ -1974,7 +2075,7 @@
 
         function collectJuSearchBridgeCondition() {
             const sourceMode = getJuSearchBridgeMode();
-            const form = getJuSearchBridgeForm();
+            const form = getJuSearchBridgeForm(sourceMode);
             if (!isJuSearchBridgeMode(sourceMode) || !form) return null;
 
             const fields = Array.from(form.querySelectorAll("input,select,textarea"))
@@ -1999,17 +2100,24 @@
         }
 
         function getJuSearchBridgeTargetPrefix(mode) {
+            const form = getJuSearchBridgeForm(mode);
+            const match = String(form?.id || "").match(/^(b\d+)-Form$/);
+            if (match) return `${match[1]}-`;
+
             return mode === "market" ? "b3-" : "b5-";
         }
 
         function restoreJuSearchBridgeCondition(condition, targetMode) {
             const prefix = getJuSearchBridgeTargetPrefix(targetMode);
+            const form = getJuSearchBridgeForm(targetMode) || document;
 
             for (const record of condition.fields || []) {
                 const key = record.key || getJuSearchBridgeFieldKey(record);
                 if (!key) continue;
 
-                const target = document.getElementById(`${prefix}${key}`);
+                const target = document.getElementById(`${prefix}${key}`) ||
+                    form.querySelector?.(`[id$="-${CSS.escape(key)}"]`) ||
+                    document.querySelector(`[id$="-${CSS.escape(key)}"]`);
                 if (!target) continue;
 
                 applySearchBridgeFieldRecord(target, record);
@@ -2023,7 +2131,7 @@
         }
 
         function submitJuSearchBridge() {
-            const form = getJuSearchBridgeForm();
+            const form = getJuSearchBridgeForm(getJuSearchBridgeMode());
             const button = findSearchBridgeButtonByText("この条件で検索", form || document);
 
             if (button) {
@@ -2054,11 +2162,17 @@
                 getModeLabel: getJuSearchBridgeModeLabel,
                 getOppositeMode: getJuOppositeSearchBridgeMode,
                 isSearchMode: isJuSearchBridgeMode,
-                canSaveCurrent: () => isJuSearchBridgeMode(getJuSearchBridgeMode()) && !!getJuSearchBridgeForm(),
+                canSaveCurrent: () => {
+                    const mode = getJuSearchBridgeMode();
+                    return isJuSearchBridgeMode(mode) && !!getJuSearchBridgeForm(mode);
+                },
                 collectCondition: collectJuSearchBridgeCondition,
                 restoreCondition: restoreJuSearchBridgeCondition,
                 getTargetUrl: getJuSearchBridgeTargetUrl,
-                isRestoreReady: () => isJuSearchBridgeMode(getJuSearchBridgeMode()) && !!getJuSearchBridgeForm(),
+                isRestoreReady: () => {
+                    const mode = getJuSearchBridgeMode();
+                    return isJuSearchBridgeMode(mode) && !!getJuSearchBridgeForm(mode);
+                },
                 submitSearch: submitJuSearchBridge
             };
         }
