@@ -1824,7 +1824,26 @@
 
         function clickSearchBridgeElement(el) {
             if (!el) return false;
-            el.click();
+
+            if (typeof el.click === "function") {
+                el.click();
+                return true;
+            }
+
+            const doc = el.ownerDocument || document;
+            const view = doc.defaultView || window;
+            const eventTypes = ["pointerdown", "mousedown", "mouseup", "click"];
+            for (const type of eventTypes) {
+                let event;
+                try {
+                    event = new MouseEvent(type, { bubbles: true, cancelable: true, view });
+                } catch (error) {
+                    event = doc.createEvent("MouseEvents");
+                    event.initMouseEvent(type, true, true, view, 1, 0, 0, 0, 0, false, false, false, false, 0, null);
+                }
+                el.dispatchEvent(event);
+            }
+
             return true;
         }
 
@@ -1929,12 +1948,35 @@
             return null;
         }
 
+        function hasAraiSelectedVenue() {
+            return Array.from(document.querySelectorAll("input[type='checkbox']"))
+                .some(el => isSearchBridgeElementVisible(el) &&
+                    /^(kaijo|aa4w|tp4w|week4w)/i.test(el.name || el.id || "") &&
+                    el.checked);
+        }
+
+        function ensureAraiVenueSelection() {
+            if (hasAraiSelectedVenue()) return false;
+
+            const all4w = document.getElementById("CKALL4W");
+            if (isSearchBridgeElementVisible(all4w)) {
+                clickSearchBridgeElement(all4w);
+                return true;
+            }
+
+            return false;
+        }
+
         function clickAraiVenueSearchIfReady() {
             const venueButton = getVisibleAraiSearchButton(["btn_kaijo", "btKaijo_exe"]);
-            if (venueButton) return clickSearchBridgeElement(venueButton);
+            if (venueButton) {
+                ensureAraiVenueSelection();
+                return clickSearchBridgeElement(venueButton);
+            }
 
             const venueArea = document.getElementById("tbKaijoList");
             if (isSearchBridgeElementVisible(venueArea)) {
+                ensureAraiVenueSelection();
                 const searchButton = Array.from(venueArea.querySelectorAll("button,input[type='button'],input[type='submit'],a"))
                     .find(el => isSearchBridgeElementVisible(el) && /検索|次へ/.test(normalizeSearchBridgeText(el.textContent || el.value)));
                 if (searchButton) return clickSearchBridgeElement(searchButton);
@@ -2132,10 +2174,13 @@
 
         function submitJuSearchBridge() {
             const form = getJuSearchBridgeForm(getJuSearchBridgeMode());
-            const button = findSearchBridgeButtonByText("この条件で検索", form || document);
+            const button =
+                findVisibleSearchBridgeButtonByText("この条件で検索", form || document) ||
+                findVisibleSearchBridgeButtonByText("この条件で検索", document) ||
+                findSearchBridgeButtonByText("この条件で検索", form || document) ||
+                findSearchBridgeButtonByText("この条件で検索", document);
 
-            if (button) {
-                button.click();
+            if (clickSearchBridgeElement(button)) {
                 return;
             }
 
