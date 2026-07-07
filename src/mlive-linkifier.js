@@ -1473,7 +1473,7 @@
             wrap.textContent = "";
             styleSiteSearchBridgeLauncher(wrap);
 
-            const btn = createSiteSearchBridgeButton("条件保存", async () => {
+            const btn = createSiteSearchBridgeButton(`${adapter.title || ""}条件保存`, async () => {
                 await renderSiteSearchBridgePanel(wrap, adapter);
             });
             btn.style.padding = "8px 10px";
