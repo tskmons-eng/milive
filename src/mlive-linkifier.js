@@ -264,13 +264,17 @@
         const MLIVE_SEARCH_BRIDGE_PENDING_KEY = "mliveSearchBridgePending";
         const ARAI_SEARCH_BRIDGE_SLOTS_KEY = "araiSearchBridgeSlots";
         const ARAI_SEARCH_BRIDGE_PENDING_KEY = "araiSearchBridgePending";
+        const ARAI_SEARCH_BRIDGE_LOG_KEY = "araiSearchBridgeDebugLog";
+        const ARAI_SEARCH_BRIDGE_RUN_KEY = "araiSearchBridgeRunState";
+        const ARAI_SEARCH_BRIDGE_LOG_LIMIT = 80;
+        const SEARCH_BRIDGE_PENDING_MAX_AGE_MS = 10 * 60 * 1000;
         const JU_SEARCH_BRIDGE_SLOTS_KEY = "juSearchBridgeSlots";
         const JU_SEARCH_BRIDGE_PENDING_KEY = "juSearchBridgePending";
         const MLIVE_NORMAL_AA_CODES = new Set(["131", "220", "132"]);
         let mliveSearchBridgePendingRunning = false;
         let mliveSearchBridgePendingApplied = false;
         const siteSearchBridgeState = {
-            arai: { pendingRunning: false, pendingApplied: false },
+            arai: { pendingRunning: false, pendingApplied: false, pendingRetryTimer: null },
             ju: { pendingRunning: false, pendingApplied: false }
         };
 
@@ -1055,7 +1059,7 @@
                     return;
                 }
 
-                if (Date.now() - Number(pending.createdAt || 0) > 10 * 60 * 1000) {
+                if (Date.now() - Number(pending.createdAt || 0) > SEARCH_BRIDGE_PENDING_MAX_AGE_MS) {
                     await chrome.storage.local.remove(MLIVE_SEARCH_BRIDGE_PENDING_KEY);
                     return;
                 }
@@ -1357,13 +1361,25 @@
 
             const pending = {
                 version: MLIVE_SEARCH_BRIDGE_VERSION,
+                id: `${adapter.siteId || "site"}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                 targetMode,
                 condition: savedCondition,
                 createdAt: Date.now(),
                 sourceUrl: location.href
             };
 
+            if (adapter.state) {
+                if (adapter.state.pendingRetryTimer) {
+                    clearTimeout(adapter.state.pendingRetryTimer);
+                    adapter.state.pendingRetryTimer = null;
+                }
+                adapter.state.pendingApplied = false;
+                adapter.state.pendingRunning = false;
+            }
             await chrome.storage.local.set({ [adapter.pendingKey]: pending });
+            if (typeof adapter.afterPendingCreated === "function") {
+                await adapter.afterPendingCreated(pending, targetMode, savedCondition);
+            }
             location.href = targetUrl;
         }
 
@@ -1481,6 +1497,7 @@
             btn.style.borderRadius = "18px";
             btn.style.fontWeight = "700";
             btn.style.boxShadow = "0 2px 10px rgba(0,0,0,0.18)";
+            Object.assign(btn.style, adapter.launcherStyle || {});
             wrap.appendChild(btn);
         }
 
@@ -1504,10 +1521,20 @@
                 title.style.fontWeight = "700";
                 header.appendChild(title);
 
-                header.appendChild(createSiteSearchBridgeButton("閉じる", async () => {
+                const headerActions = document.createElement("div");
+                headerActions.style.display = "flex";
+                headerActions.style.alignItems = "center";
+                headerActions.style.gap = "6px";
+
+                if (typeof adapter.appendPanelActions === "function") {
+                    adapter.appendPanelActions(headerActions, wrap, adapter);
+                }
+
+                headerActions.appendChild(createSiteSearchBridgeButton("閉じる", async () => {
                     renderSiteSearchBridgeLauncher(wrap, adapter);
                 }));
 
+                header.appendChild(headerActions);
                 wrap.appendChild(header);
 
                 for (const slot of store.slots) {
@@ -1617,11 +1644,20 @@
             renderSiteSearchBridgeLauncher(wrap, adapter);
         }
 
+        function scheduleSiteSearchBridgePendingRetry(adapter, delay = 700) {
+            if (!adapter?.state || adapter.state.pendingRetryTimer) return;
+
+            adapter.state.pendingRetryTimer = setTimeout(() => {
+                adapter.state.pendingRetryTimer = null;
+                applySiteSearchBridgePending(adapter);
+            }, delay);
+        }
+
         async function applySiteSearchBridgePending(adapter) {
             if (adapter.state.pendingRunning || adapter.state.pendingApplied) return;
 
             const currentMode = adapter.getCurrentMode();
-            if (!adapter.isSearchMode(currentMode) || !adapter.isRestoreReady()) return;
+            if (!adapter.isSearchMode(currentMode)) return;
 
             adapter.state.pendingRunning = true;
             try {
@@ -1631,11 +1667,17 @@
 
                 if (pending.version !== MLIVE_SEARCH_BRIDGE_VERSION || !pending.condition) {
                     await chrome.storage.local.remove(adapter.pendingKey);
+                    if (typeof adapter.afterPendingCleared === "function") {
+                        await adapter.afterPendingCleared("invalid_pending", pending);
+                    }
                     return;
                 }
 
-                if (Date.now() - Number(pending.createdAt || 0) > 10 * 60 * 1000) {
+                if (Date.now() - Number(pending.createdAt || 0) > SEARCH_BRIDGE_PENDING_MAX_AGE_MS) {
                     await chrome.storage.local.remove(adapter.pendingKey);
+                    if (typeof adapter.afterPendingCleared === "function") {
+                        await adapter.afterPendingCleared("expired_pending", pending);
+                    }
                     return;
                 }
 
@@ -1644,12 +1686,26 @@
                 const condition = normalizeSiteSearchBridgeCondition(pending.condition);
                 if (!condition) {
                     await chrome.storage.local.remove(adapter.pendingKey);
+                    if (typeof adapter.afterPendingCleared === "function") {
+                        await adapter.afterPendingCleared("empty_condition", pending);
+                    }
                     return;
+                }
+
+                if (typeof adapter.beforePendingRestore === "function") {
+                    const handled = await adapter.beforePendingRestore(pending, currentMode, condition);
+                    if (handled) return;
                 }
 
                 if (typeof adapter.beforeRestore === "function") {
                     adapter.beforeRestore(currentMode);
                 }
+
+                if (!adapter.isRestoreReady()) {
+                    scheduleSiteSearchBridgePendingRetry(adapter);
+                    return;
+                }
+
                 adapter.restoreCondition(condition, currentMode);
                 adapter.state.pendingApplied = true;
                 await chrome.storage.local.remove(adapter.pendingKey);
@@ -1657,6 +1713,9 @@
                 showSiteSearchBridgeNotice(adapter, `保存条件で${adapter.getModeLabel(currentMode)}検索します`);
                 setTimeout(() => adapter.submitSearch(), 160);
             } catch (error) {
+                if (/extension context invalidated/i.test(String(error?.message || error))) {
+                    return;
+                }
                 console.warn("MLive Linkifier: site bridge pending search failed", adapter.siteId, error);
                 showSiteSearchBridgeNotice(adapter, "保存条件の検索に失敗しました", "error");
             } finally {
@@ -1814,7 +1873,7 @@
 
             return candidates.find(el => {
                 const actual = normalizeSearchBridgeText(el.textContent || el.value || el.getAttribute("aria-label"));
-                return actual === expected && isSearchBridgeElementVisible(el);
+                return actual.includes(expected) && isSearchBridgeElementVisible(el);
             }) || null;
         }
 
@@ -1823,32 +1882,387 @@
             return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
         }
 
-        function clickSearchBridgeElement(el) {
+        function clickSearchBridgeElement(el, withMouseEvents = false) {
             if (!el) return false;
+
+            const doc = el.ownerDocument || document;
+            const view = doc.defaultView || window;
+            const dispatchMouseEvents = () => {
+                const rect = typeof el.getBoundingClientRect === "function"
+                    ? el.getBoundingClientRect()
+                    : { left: 0, top: 0, width: 0, height: 0 };
+                const clientX = Math.round(rect.left + Math.max(1, rect.width / 2));
+                const clientY = Math.round(rect.top + Math.max(1, rect.height / 2));
+                const common = {
+                    bubbles: true,
+                    cancelable: true,
+                    composed: true,
+                    view,
+                    clientX,
+                    clientY,
+                    screenX: clientX,
+                    screenY: clientY,
+                    button: 0,
+                    buttons: 1
+                };
+                const eventTypes = ["pointerdown", "mousedown", "pointerup", "mouseup", "click"];
+                for (const type of eventTypes) {
+                    let event;
+                    try {
+                        event = type.startsWith("pointer") && typeof PointerEvent === "function"
+                            ? new PointerEvent(type, { ...common, pointerId: 1, pointerType: "mouse", isPrimary: true })
+                            : new MouseEvent(type, common);
+                    } catch (error) {
+                        event = doc.createEvent("MouseEvents");
+                        event.initMouseEvent(type, true, true, view, 1, clientX, clientY, clientX, clientY, false, false, false, false, 0, null);
+                    }
+                    el.dispatchEvent(event);
+                }
+            };
+
+            if (withMouseEvents) {
+                dispatchMouseEvents();
+                if (typeof el.click === "function") {
+                    el.click();
+                }
+                return true;
+            }
 
             if (typeof el.click === "function") {
                 el.click();
                 return true;
             }
 
-            const doc = el.ownerDocument || document;
-            const view = doc.defaultView || window;
-            const eventTypes = ["pointerdown", "mousedown", "mouseup", "click"];
-            for (const type of eventTypes) {
-                let event;
-                try {
-                    event = new MouseEvent(type, { bubbles: true, cancelable: true, view });
-                } catch (error) {
-                    event = doc.createEvent("MouseEvents");
-                    event.initMouseEvent(type, true, true, view, 1, 0, 0, 0, 0, false, false, false, false, 0, null);
-                }
-                el.dispatchEvent(event);
-            }
-
+            dispatchMouseEvents();
             return true;
         }
 
         // ===== Arai 検索条件ブリッジ =====
+
+        const ARAI_KAIJO_ACTION_ATTR = "data-mlive-arai-kaijo-action";
+        const ARAI_KAIJO_RESULT_ATTR = "data-mlive-arai-kaijo-result";
+        const ARAI_KAIJO_ERROR_ATTR = "data-mlive-arai-kaijo-error";
+        const ARAI_KAIJO_DIAGNOSTIC_ATTR = "data-mlive-arai-kaijo-diagnostic";
+        const ARAI_KAIJO_PROBE_ONLY_ATTR = "data-mlive-arai-kaijo-probe-only";
+        const ARAI_KAIJO_ACTION_EVENT = "mlive-linkifier:arai-kaijo-action";
+
+        const araiSearchBridgeFlow = {
+            pendingId: "",
+            venuePageLogged: false,
+            venueSelectedLogged: false,
+            venueSelectClicked: false,
+            venueSelectAttemptCount: 0,
+            conditionFormLoggedUrl: "",
+            resultLoggedUrl: "",
+            conditionTabActivated: false,
+            nextAttempted: false,
+            nextAttemptedAt: 0,
+            nextAttemptCount: 0,
+            awaitingConditionAfterNext: false,
+            nextActionFailures: 0,
+            lastSignature: "",
+            sameSignatureCount: 0,
+            stopped: false
+        };
+
+        let araiResultCheckRunning = false;
+
+        function getAraiSearchBridgePendingId(pending) {
+            return String(pending?.id || `${pending?.createdAt || ""}:${pending?.targetMode || ""}`);
+        }
+
+        function resetAraiSearchBridgeFlow(pending = null) {
+            Object.assign(araiSearchBridgeFlow, {
+                pendingId: pending ? getAraiSearchBridgePendingId(pending) : "",
+                venuePageLogged: false,
+                venueSelectedLogged: false,
+                venueSelectClicked: false,
+                venueSelectAttemptCount: 0,
+                conditionFormLoggedUrl: "",
+                resultLoggedUrl: "",
+                conditionTabActivated: false,
+                nextAttempted: false,
+                nextAttemptedAt: 0,
+                nextAttemptCount: 0,
+                awaitingConditionAfterNext: false,
+                nextActionFailures: 0,
+                lastSignature: "",
+                sameSignatureCount: 0,
+                stopped: false
+            });
+        }
+
+        function ensureAraiSearchBridgeFlow(pending) {
+            const pendingId = getAraiSearchBridgePendingId(pending);
+            if (araiSearchBridgeFlow.pendingId !== pendingId) {
+                resetAraiSearchBridgeFlow(pending);
+            }
+        }
+
+        function getAraiVenueInputs() {
+            return Array.from(document.querySelectorAll("input[type='checkbox']"))
+                .filter(el => {
+                    const marker = `${el.name || ""} ${el.id || ""}`;
+                    return /^(kaijo|aa4w|tp4w|week4w)/i.test(el.name || el.id || "") ||
+                        /(?:^|\s)(?:2w|4w|ke|ab)\d+/i.test(marker) ||
+                        el.name === "kaijo4w";
+                });
+        }
+
+        function getAraiSelectedVenueInputs() {
+            return getAraiVenueInputs().filter(el => el.checked);
+        }
+
+        function getAraiCheckedVenueCount() {
+            return getAraiSelectedVenueInputs().length;
+        }
+
+        function forceAraiFourWheelVenueCheckboxes() {
+            const inputs = Array.from(document.querySelectorAll("input[type='checkbox']"))
+                .filter(el => el.name === "kaijo4w" || /^4w\d+$/i.test(el.id || ""));
+            const extraIds = ["we4wAA", "we4wTP"];
+            let changed = 0;
+
+            for (const el of inputs) {
+                if (!el.checked) changed += 1;
+                el.checked = true;
+                el.dispatchEvent(new Event("input", { bubbles: true }));
+                el.dispatchEvent(new Event("change", { bubbles: true }));
+            }
+
+            for (const id of extraIds) {
+                const el = document.getElementById(id);
+                if (el && "checked" in el) {
+                    if (!el.checked) changed += 1;
+                    el.checked = true;
+                    el.dispatchEvent(new Event("input", { bubbles: true }));
+                    el.dispatchEvent(new Event("change", { bubbles: true }));
+                }
+            }
+
+            return changed || inputs.length;
+        }
+
+        function parseAraiKaijoDiagnostic() {
+            const raw = document.documentElement?.getAttribute(ARAI_KAIJO_DIAGNOSTIC_ATTR) || "";
+            if (!raw) return null;
+
+            try {
+                return JSON.parse(raw);
+            } catch (error) {
+                return { parseError: String(error?.message || error), raw: raw.slice(0, 300) };
+            }
+        }
+
+        function getAraiDomSelectedVenueCount() {
+            let count = 0;
+            const activeSelectors = [
+                "#toggle_car.active",
+                "#toggle_car.selected",
+                "#toggle_car.on",
+                "#CKALL4W.active",
+                "#CKALL4W.selected",
+                "#CKALL4W.on",
+                "#CKALL4W[aria-checked='true']",
+                "#CKALL4W[aria-selected='true']"
+            ];
+
+            for (const selector of activeSelectors) {
+                if (document.querySelector(selector)) count += 1;
+            }
+
+            const all4w = document.getElementById("CKALL4W");
+            if (all4w && "checked" in all4w && all4w.checked) count += 1;
+
+            return count;
+        }
+
+        function hasAraiSearchBridgeResultContent() {
+            if (document.querySelector("#spList,#mainGazou,ul#gazou")) return true;
+
+            const text = document.body?.innerText || "";
+            return /該当件数|検索結果|該当.*件|0件/.test(text);
+        }
+
+        function getAraiSearchBridgeStage() {
+            if (isAraiSearchBridgeLoading()) return "loading";
+            if (isAraiVenueSelectionStep() && !hasAraiConditionSearchButton()) {
+                return hasAraiSelectedVenue() ? "venue_selected" : "venue_select";
+            }
+            if (hasAraiConditionSearchButton()) return "condition";
+            if (hasAraiSearchBridgeResultContent()) return "result";
+            return "unknown";
+        }
+
+        function createAraiSearchBridgeSnapshot(extra = {}) {
+            const root = document.documentElement;
+            const venueInputs = getAraiVenueInputs();
+            const selectedInputs = venueInputs.filter(el => el.checked);
+            const mainDiagnostic = parseAraiKaijoDiagnostic();
+            const mainState = mainDiagnostic?.after || mainDiagnostic?.before || null;
+            const mainInternalSelectedVenueCount = mainState
+                ? Number(mainState.fourwheelSelectCount || 0) +
+                    Number(mainState.bykeSelectCount || 0) +
+                    Number(mainState.kenkiSelectCount || 0) +
+                    Number(mainState.abroadSelectCount || 0) +
+                    Number(mainState.dispListSelectCount || 0)
+                : 0;
+            const mainActiveVenueNodeCount = Number(mainState?.activeVenueNodeCount || 0);
+            const domSelectedVenueCount = getAraiDomSelectedVenueCount();
+
+            return {
+                url: location.href,
+                mode: getAraiSearchBridgeMode(),
+                stage: getAraiSearchBridgeStage(),
+                readyState: document.readyState,
+                loading: isAraiSearchBridgeLoading(),
+                venueStep: isAraiVenueSelectionStep(),
+                venueInputCount: venueInputs.length,
+                selectedVenueCount: selectedInputs.length,
+                domSelectedVenueCount,
+                mainInternalSelectedVenueCount,
+                mainActiveVenueNodeCount,
+                effectiveSelectedVenueCount: Math.max(
+                    selectedInputs.length,
+                    domSelectedVenueCount,
+                    mainActiveVenueNodeCount
+                ),
+                selectedVenueSample: selectedInputs.slice(0, 8).map(el => el.id || el.name || el.value),
+                hasCKALL4W: isSearchBridgeElementVisible(document.getElementById("CKALL4W")),
+                hasBtnKaijo: isSearchBridgeElementVisible(document.getElementById("btn_kaijo")),
+                hasBtKaijoExe: isSearchBridgeElementVisible(document.getElementById("btKaijo_exe")),
+                hasConditionButton: hasAraiConditionSearchButton(),
+                hasResultContent: hasAraiSearchBridgeResultContent(),
+                bridgeAction: root?.getAttribute(ARAI_KAIJO_ACTION_ATTR) || "",
+                bridgeResult: root?.getAttribute(ARAI_KAIJO_RESULT_ATTR) || "",
+                bridgeError: root?.getAttribute(ARAI_KAIJO_ERROR_ATTR) || "",
+                mainDiagnostic,
+                ...extra
+            };
+        }
+
+        function getAraiEffectiveSelectedVenueCount(snapshot = createAraiSearchBridgeSnapshot()) {
+            return Number(snapshot.effectiveSelectedVenueCount || 0);
+        }
+
+        function recordAraiSearchBridgeLog(step, detail = {}) {
+            const entry = {
+                at: new Date().toISOString(),
+                step,
+                detail,
+                snapshot: createAraiSearchBridgeSnapshot()
+            };
+
+            console.info("MLive Linkifier: Arai bridge", step, entry);
+
+            const storage = globalThis.chrome?.storage?.local;
+            if (!storage) return;
+
+            void (async () => {
+                const result = await storage.get(ARAI_SEARCH_BRIDGE_LOG_KEY);
+                const log = Array.isArray(result[ARAI_SEARCH_BRIDGE_LOG_KEY])
+                    ? result[ARAI_SEARCH_BRIDGE_LOG_KEY]
+                    : [];
+                log.push(entry);
+                await storage.set({ [ARAI_SEARCH_BRIDGE_LOG_KEY]: log.slice(-ARAI_SEARCH_BRIDGE_LOG_LIMIT) });
+            })().catch(error => {
+                if (!/extension context invalidated/i.test(String(error?.message || error))) {
+                    console.warn("MLive Linkifier: Arai bridge log failed", error);
+                }
+            });
+        }
+
+        async function clearAraiSearchBridgePending(reason = "manual") {
+            resetAraiSearchBridgeFlow();
+            await chrome.storage.local.remove([ARAI_SEARCH_BRIDGE_PENDING_KEY, ARAI_SEARCH_BRIDGE_RUN_KEY]);
+            if (siteSearchBridgeState.arai.pendingRetryTimer) {
+                clearTimeout(siteSearchBridgeState.arai.pendingRetryTimer);
+                siteSearchBridgeState.arai.pendingRetryTimer = null;
+            }
+            siteSearchBridgeState.arai.pendingApplied = false;
+            siteSearchBridgeState.arai.pendingRunning = false;
+            recordAraiSearchBridgeLog("保留クリア", { reason });
+        }
+
+        function getAraiVenueStateSignature() {
+            const snapshot = createAraiSearchBridgeSnapshot();
+            return JSON.stringify({
+                url: snapshot.url,
+                stage: snapshot.stage,
+                selectedVenueCount: snapshot.selectedVenueCount,
+                effectiveSelectedVenueCount: snapshot.effectiveSelectedVenueCount,
+                mainInternalSelectedVenueCount: snapshot.mainInternalSelectedVenueCount,
+                hasCKALL4W: snapshot.hasCKALL4W,
+                hasBtnKaijo: snapshot.hasBtnKaijo,
+                hasBtKaijoExe: snapshot.hasBtKaijoExe,
+                hasConditionButton: snapshot.hasConditionButton,
+                bridgeAction: snapshot.bridgeAction,
+                bridgeResult: snapshot.bridgeResult,
+                bridgeError: snapshot.bridgeError
+            });
+        }
+
+        function updateAraiVenueRepeatState() {
+            const signature = getAraiVenueStateSignature();
+            if (signature === araiSearchBridgeFlow.lastSignature) {
+                araiSearchBridgeFlow.sameSignatureCount += 1;
+            } else {
+                araiSearchBridgeFlow.lastSignature = signature;
+                araiSearchBridgeFlow.sameSignatureCount = 1;
+            }
+
+            return araiSearchBridgeFlow.sameSignatureCount;
+        }
+
+        async function stopAraiSearchBridgeFlow(reason, detail = {}) {
+            if (araiSearchBridgeFlow.stopped) return;
+
+            araiSearchBridgeFlow.stopped = true;
+            recordAraiSearchBridgeLog("失敗停止", { reason, ...detail });
+            showSiteSearchBridgeNotice(getAraiSearchBridgeAdapter(), reason, "error");
+            await chrome.storage.local.remove([ARAI_SEARCH_BRIDGE_PENDING_KEY, ARAI_SEARCH_BRIDGE_RUN_KEY]);
+        }
+
+        async function markAraiSearchBridgeAwaitingResult(detail = {}) {
+            await chrome.storage.local.set({
+                [ARAI_SEARCH_BRIDGE_RUN_KEY]: {
+                    awaitingResult: true,
+                    createdAt: Date.now(),
+                    url: location.href,
+                    mode: getAraiSearchBridgeMode(),
+                    detail
+                }
+            });
+        }
+
+        async function logAraiSearchBridgeResultIfReady() {
+            if (araiResultCheckRunning) return;
+
+            araiResultCheckRunning = true;
+            try {
+                const result = await chrome.storage.local.get(ARAI_SEARCH_BRIDGE_RUN_KEY);
+                const runState = result[ARAI_SEARCH_BRIDGE_RUN_KEY];
+                if (!runState?.awaitingResult) return;
+
+                if (Date.now() - Number(runState.createdAt || 0) > 2 * 60 * 1000) {
+                    await chrome.storage.local.remove(ARAI_SEARCH_BRIDGE_RUN_KEY);
+                    recordAraiSearchBridgeLog("失敗停止", { reason: "検索結果の到達確認が時間切れになりました" });
+                    return;
+                }
+
+                const stage = getAraiSearchBridgeStage();
+                if (stage === "result") {
+                    recordAraiSearchBridgeLog("結果到達", { from: runState.url, mode: runState.mode });
+                    await chrome.storage.local.remove(ARAI_SEARCH_BRIDGE_RUN_KEY);
+                }
+            } catch (error) {
+                if (!/extension context invalidated/i.test(String(error?.message || error))) {
+                    console.warn("MLive Linkifier: Arai result log failed", error);
+                }
+            } finally {
+                araiResultCheckRunning = false;
+            }
+        }
 
         function getAraiSearchBridgeMode() {
             const path = location.pathname.toLowerCase().replace(/\/+$/, "");
@@ -1916,21 +2330,43 @@
         }
 
         function restoreAraiSearchBridgeCondition(condition) {
+            if (araiSearchBridgeFlow.conditionFormLoggedUrl !== location.href) {
+                araiSearchBridgeFlow.conditionFormLoggedUrl = location.href;
+                recordAraiSearchBridgeLog("条件フォーム到達", {
+                    targetMode: getAraiSearchBridgeMode(),
+                    fieldCount: condition.fields?.length || 0
+                });
+            }
+
+            let restoredCount = 0;
             for (const record of condition.fields || []) {
                 const target = findAraiSearchBridgeControl(record);
                 if (!target) continue;
 
                 applySearchBridgeFieldRecord(target, record);
+                restoredCount += 1;
             }
+
+            recordAraiSearchBridgeLog("条件復元", {
+                targetMode: getAraiSearchBridgeMode(),
+                restoredCount,
+                fieldCount: condition.fields?.length || 0
+            });
         }
 
         function getAraiSearchBridgeTargetUrl(mode) {
             if (mode === "listing") return new URL("/01_search.html", location.origin).toString();
-            if (mode === "market") return new URL("/04_information.html?id=0=", location.origin).toString();
+            if (mode === "market") return new URL(`/04_information.html?id=0=${Math.random()}`, location.origin).toString();
             return "";
         }
 
+        function isAraiSearchBridgeLoading() {
+            return (document.body?.innerText || "").includes("検索中です");
+        }
+
         function activateAraiSearchBridgeConditionTab(mode) {
+            if (isAraiSearchBridgeLoading() || hasAraiConditionSearchButton()) return;
+
             const tabId = mode === "market" ? "johoTab3" : "tbSearchTab5";
             const tab = document.getElementById(tabId) ||
                 Array.from(document.querySelectorAll("a,button")).find(el => normalizeSearchBridgeText(el.textContent) === "条件指定");
@@ -1949,64 +2385,400 @@
             return null;
         }
 
-        function hasAraiSelectedVenue() {
-            return Array.from(document.querySelectorAll("input[type='checkbox']"))
-                .some(el => isSearchBridgeElementVisible(el) &&
-                    /^(kaijo|aa4w|tp4w|week4w)/i.test(el.name || el.id || "") &&
-                    el.checked);
+        function hasAraiConditionSearchButton() {
+            return !!(
+                getVisibleAraiSearchButton(["btSearch", "btAppointed"]) ||
+                findVisibleSearchBridgeButtonByText("この条件で検索")
+            );
         }
 
-        function ensureAraiVenueSelection() {
-            if (hasAraiSelectedVenue()) return false;
-
+        function isAraiVenueSelectionStep() {
+            const venueButton = getVisibleAraiSearchButton(["btn_kaijo", "btKaijo_exe"]);
+            const venueArea = document.getElementById("tbKaijoList");
             const all4w = document.getElementById("CKALL4W");
-            if (isSearchBridgeElementVisible(all4w)) {
-                clickSearchBridgeElement(all4w);
-                return true;
+
+            return !!venueButton ||
+                (isSearchBridgeElementVisible(venueArea) && isSearchBridgeElementVisible(all4w));
+        }
+
+        let araiPendingLoadingStartedAt = 0;
+
+        function runAraiKaijoSelectorAction(id, options = {}) {
+            const root = document.documentElement;
+            if (!root) {
+                return { ok: false, error: "documentElement is not ready", diagnostic: null };
             }
 
-            return false;
+            const action = String(id || "");
+            root.setAttribute(ARAI_KAIJO_ACTION_ATTR, action);
+            root.setAttribute(ARAI_KAIJO_RESULT_ATTR, "0");
+            root.setAttribute(ARAI_KAIJO_PROBE_ONLY_ATTR, options.probeOnly ? "1" : "0");
+            root.removeAttribute(ARAI_KAIJO_ERROR_ATTR);
+            root.removeAttribute(ARAI_KAIJO_DIAGNOSTIC_ATTR);
+            window.dispatchEvent(new CustomEvent(ARAI_KAIJO_ACTION_EVENT));
+
+            return {
+                ok: root.getAttribute(ARAI_KAIJO_RESULT_ATTR) === "1",
+                error: root.getAttribute(ARAI_KAIJO_ERROR_ATTR) || "",
+                diagnostic: parseAraiKaijoDiagnostic()
+            };
+        }
+
+        function waitForAraiBridgeDelay(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        async function selectAraiFourWheelVenuesDirectly() {
+            if (getAraiCheckedVenueCount() > 0) return true;
+            if (araiSearchBridgeFlow.venueSelectAttemptCount >= 4) return false;
+            araiSearchBridgeFlow.venueSelectAttemptCount += 1;
+
+            const beforeSnapshot = createAraiSearchBridgeSnapshot();
+            const all4w = document.getElementById("CKALL4W");
+            let domClickOk = false;
+            let selectResult = { ok: false, error: "", diagnostic: null };
+
+            if (isSearchBridgeElementVisible(all4w)) {
+                domClickOk = clickSearchBridgeElement(all4w, true);
+                await waitForAraiBridgeDelay(450);
+            }
+
+            if (!getAraiDomSelectedVenueCount()) {
+                selectResult = runAraiKaijoSelectorAction("select_venues_auto");
+                await waitForAraiBridgeDelay(450);
+            }
+
+            const forcedVenueChecks = forceAraiFourWheelVenueCheckboxes();
+            if (forcedVenueChecks) await waitForAraiBridgeDelay(150);
+
+            araiSearchBridgeFlow.venueSelectClicked = true;
+            const afterSnapshot = createAraiSearchBridgeSnapshot();
+            const afterEffectiveSelectedVenueCount = getAraiEffectiveSelectedVenueCount(afterSnapshot);
+            recordAraiSearchBridgeLog("Arai venue selection attempts", {
+                ok: selectResult.ok || afterEffectiveSelectedVenueCount > 0,
+                method: domClickOk ? "dom-click:CKALL4W" : "main-world:auto",
+                error: selectResult.error,
+                beforeEffectiveSelectedVenueCount: getAraiEffectiveSelectedVenueCount(beforeSnapshot),
+                afterEffectiveSelectedVenueCount,
+                domSelectedVenueCount: getAraiDomSelectedVenueCount(),
+                forcedVenueChecks,
+                attemptCount: araiSearchBridgeFlow.venueSelectAttemptCount,
+                diagnostic: selectResult.diagnostic
+            });
+
+            return selectResult.ok || afterEffectiveSelectedVenueCount > 0;
+        }
+
+        function hasAraiSelectedVenue() {
+            const venueInputs = getAraiVenueInputs();
+            if (venueInputs.length > 0) {
+                if (venueInputs.some(el => el.checked)) return true;
+            }
+
+            if (getAraiDomSelectedVenueCount() > 0) return true;
+
+            const all4wIcon = document.getElementById("ic_4w");
+            if (all4wIcon) {
+                const style = window.getComputedStyle(all4wIcon);
+                if (style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0") return true;
+            }
+
+            const toggleCar = document.getElementById("toggle_car");
+            const classText = `${toggleCar?.className || ""} ${document.getElementById("CKALL4W")?.className || ""}`;
+            return /\b(on|active|selected|checked|is-active|is-selected)\b/i.test(classText);
+        }
+
+        async function advanceAraiVenueSelection(pending = null) {
+            if (pending) ensureAraiSearchBridgeFlow(pending);
+            if (araiSearchBridgeFlow.stopped) return { handled: true, delay: 0 };
+            if (hasAraiConditionSearchButton()) return { handled: false, delay: 0 };
+
+            const repeatCount = updateAraiVenueRepeatState();
+            if (!araiSearchBridgeFlow.venuePageLogged) {
+                araiSearchBridgeFlow.venuePageLogged = true;
+                recordAraiSearchBridgeLog("会場ページ到達", {
+                    targetMode: getAraiSearchBridgeMode(),
+                    pendingId: araiSearchBridgeFlow.pendingId
+                });
+            }
+
+            if (!araiSearchBridgeFlow.conditionTabActivated) {
+                const tabResult = runAraiKaijoSelectorAction("activate_condition_tab");
+                recordAraiSearchBridgeLog("Arai condition tab activated", {
+                    ok: tabResult.ok,
+                    error: tabResult.error,
+                    diagnostic: tabResult.diagnostic
+                });
+
+                if (!tabResult.ok) {
+                    araiSearchBridgeFlow.nextActionFailures += 1;
+                    if (araiSearchBridgeFlow.nextActionFailures >= 3) {
+                        await stopAraiSearchBridgeFlow("Arai condition tab activation failed", {
+                            error: tabResult.error,
+                            diagnostic: tabResult.diagnostic
+                        });
+                        return { handled: true, delay: 0 };
+                    }
+
+                    return { handled: true, delay: 900 };
+                }
+
+                araiSearchBridgeFlow.conditionTabActivated = true;
+                araiSearchBridgeFlow.lastSignature = "";
+                araiSearchBridgeFlow.sameSignatureCount = 0;
+                return { handled: true, delay: 900 };
+            }
+
+            const currentSnapshot = createAraiSearchBridgeSnapshot();
+            let selectedCount = getAraiCheckedVenueCount();
+            const effectiveSelectedCount = getAraiEffectiveSelectedVenueCount(currentSnapshot);
+            const all4w = document.getElementById("CKALL4W");
+            const openVenueButton = getVisibleAraiSearchButton(["btn_kaijo"]);
+
+            if (selectedCount === 0 && effectiveSelectedCount > 0 && isSearchBridgeElementVisible(all4w)) {
+                const restoredVenueChecks = forceAraiFourWheelVenueCheckboxes();
+                if (restoredVenueChecks) await waitForAraiBridgeDelay(150);
+                selectedCount = getAraiCheckedVenueCount();
+                recordAraiSearchBridgeLog("会場チェック復元", {
+                    restoredVenueChecks,
+                    selectedVenueCount: selectedCount,
+                    effectiveSelectedVenueCount: effectiveSelectedCount
+                });
+            }
+
+            if (selectedCount === 0) {
+                if (!isSearchBridgeElementVisible(all4w) && openVenueButton) {
+                    recordAraiSearchBridgeLog("会場ページ到達", { action: "open_venue_selector" });
+                    clickSearchBridgeElement(openVenueButton, true);
+                    return { handled: true, delay: 900 };
+                }
+
+                if (isSearchBridgeElementVisible(all4w)) {
+                    const selected = await selectAraiFourWheelVenuesDirectly();
+                    const nextSelectedCount = getAraiCheckedVenueCount();
+                    if (selected && nextSelectedCount > 0) {
+                        araiSearchBridgeFlow.venueSelectedLogged = true;
+                        recordAraiSearchBridgeLog("会場選択済み", {
+                            selectedVenueCount: nextSelectedCount
+                        });
+                        return { handled: true, delay: 350 };
+                    }
+                }
+
+                if (repeatCount >= 7) {
+                    await stopAraiSearchBridgeFlow("Arai会場を選択できませんでした", {
+                        repeatCount,
+                        selectedCount
+                    });
+                    return { handled: true, delay: 0 };
+                }
+
+                return { handled: true, delay: 900 };
+            }
+
+            if (!araiSearchBridgeFlow.venueSelectedLogged) {
+                araiSearchBridgeFlow.venueSelectedLogged = true;
+                recordAraiSearchBridgeLog("会場選択済み", { selectedVenueCount: selectedCount });
+            }
+
+            const nextButton = getVisibleAraiSearchButton(["btKaijo_exe"]);
+            if (!nextButton) {
+                if (repeatCount >= 7) {
+                    await stopAraiSearchBridgeFlow("Arai会場の次へボタンが見つかりません", {
+                        repeatCount,
+                        selectedCount
+                    });
+                    return { handled: true, delay: 0 };
+                }
+
+                return { handled: true, delay: 900 };
+            }
+
+            if (
+                araiSearchBridgeFlow.nextAttempted &&
+                selectedCount > 0 &&
+                araiSearchBridgeFlow.nextAttemptCount < 4 &&
+                Date.now() - araiSearchBridgeFlow.nextAttemptedAt > 1200
+            ) {
+                const elapsedAfterNext = Date.now() - araiSearchBridgeFlow.nextAttemptedAt;
+                if (elapsedAfterNext < 12000) {
+                    return { handled: true, delay: 700 };
+                }
+                await stopAraiSearchBridgeFlow("Arai condition form did not appear after next", {
+                    selectedCount,
+                    nextAttemptCount: araiSearchBridgeFlow.nextAttemptCount,
+                    elapsedAfterNext,
+                    diagnostic: parseAraiKaijoDiagnostic()
+                });
+                return { handled: true, delay: 0 };
+            }
+
+            if (!araiSearchBridgeFlow.nextAttempted) {
+                const conditionTabResultBeforeNext = runAraiKaijoSelectorAction("activate_condition_tab");
+                await waitForAraiBridgeDelay(150);
+
+                let venueSelectionResultBeforeNext = null;
+                if (getAraiCheckedVenueCount() === 0) {
+                    venueSelectionResultBeforeNext = runAraiKaijoSelectorAction("select_venues_auto");
+                    await waitForAraiBridgeDelay(150);
+                }
+
+                const forcedVenueChecksBeforeNext = forceAraiFourWheelVenueCheckboxes();
+                if (forcedVenueChecksBeforeNext) await waitForAraiBridgeDelay(150);
+                selectedCount = getAraiCheckedVenueCount();
+
+                if (selectedCount === 0) {
+                    recordAraiSearchBridgeLog("会場チェック未完了", {
+                        conditionTabResultBeforeNext,
+                        venueSelectionResultBeforeNext,
+                        forcedVenueChecksBeforeNext,
+                        selectedVenueCount: selectedCount
+                    });
+                    return { handled: true, delay: 900 };
+                }
+
+                let actionResult = {
+                    ok: false,
+                    error: "",
+                    method: "dom-click:btKaijo_exe",
+                    diagnostic: null
+                };
+                const domNextClicked = clickSearchBridgeElement(nextButton, true);
+                araiSearchBridgeFlow.nextAttempted = true;
+                araiSearchBridgeFlow.nextAttemptedAt = Date.now();
+                araiSearchBridgeFlow.nextAttemptCount += 1;
+                araiSearchBridgeFlow.awaitingConditionAfterNext = true;
+                await waitForAraiBridgeDelay(1800);
+
+                if (domNextClicked && hasAraiConditionSearchButton()) {
+                    actionResult.ok = true;
+                } else if (!domNextClicked) {
+                    actionResult = runAraiKaijoSelectorAction("next_auto");
+                    await waitForAraiBridgeDelay(1800);
+                    actionResult.method = actionResult.diagnostic?.method || "main-world:next_auto";
+                    if (hasAraiConditionSearchButton()) actionResult.ok = true;
+                } else {
+                    actionResult.ok = true;
+                    actionResult.method = "dom-click:btKaijo_exe:await-condition";
+                }
+                recordAraiSearchBridgeLog("次へ実行", {
+                    ok: actionResult.ok,
+                    method: actionResult.method,
+                    error: actionResult.error,
+                    conditionTabResultBeforeNext,
+                    venueSelectionResultBeforeNext,
+                    forcedVenueChecksBeforeNext,
+                    diagnostic: actionResult.diagnostic
+                });
+
+                if (!actionResult.ok) {
+                    araiSearchBridgeFlow.nextActionFailures += 1;
+                    if (araiSearchBridgeFlow.nextActionFailures >= 3) {
+                        await stopAraiSearchBridgeFlow("Arai会場の次へ処理を実行できません", {
+                            error: actionResult.error,
+                            diagnostic: actionResult.diagnostic
+                        });
+                        return { handled: true, delay: 0 };
+                    }
+
+                    return { handled: true, delay: 1000 };
+                }
+
+                if (hasAraiConditionSearchButton()) {
+                    return { handled: false, delay: 0 };
+                }
+
+                return { handled: true, delay: 700 };
+            }
+
+            if (
+                Date.now() - araiSearchBridgeFlow.nextAttemptedAt > 10000 &&
+                repeatCount >= 8 &&
+                araiSearchBridgeFlow.nextAttemptCount >= 4
+            ) {
+                await stopAraiSearchBridgeFlow("Arai会場の次へ後に画面が変わりません", {
+                    repeatCount,
+                    selectedCount,
+                    nextAttemptCount: araiSearchBridgeFlow.nextAttemptCount,
+                    diagnostic: parseAraiKaijoDiagnostic()
+                });
+                return { handled: true, delay: 0 };
+            }
+
+            return { handled: true, delay: 1000 };
         }
 
         function clickAraiVenueSearchIfReady() {
-            const venueButton = getVisibleAraiSearchButton(["btn_kaijo", "btKaijo_exe"]);
-            if (venueButton) {
-                ensureAraiVenueSelection();
-                return clickSearchBridgeElement(venueButton);
+            if (!isAraiVenueSelectionStep()) return false;
+
+            void advanceAraiVenueSelection();
+            return true;
+        }
+
+        async function handleAraiPendingBeforeRestore(pending, currentMode) {
+            ensureAraiSearchBridgeFlow(pending);
+
+            if (isAraiVenueSelectionStep() && !hasAraiConditionSearchButton()) {
+                araiPendingLoadingStartedAt = 0;
+                const result = await advanceAraiVenueSelection(pending, currentMode);
+                if (result.delay > 0 && !araiSearchBridgeFlow.stopped) {
+                    scheduleSiteSearchBridgePendingRetry(getAraiSearchBridgeAdapter(), result.delay);
+                }
+                return result.handled;
             }
 
-            const venueArea = document.getElementById("tbKaijoList");
-            if (isSearchBridgeElementVisible(venueArea)) {
-                ensureAraiVenueSelection();
-                const searchButton = Array.from(venueArea.querySelectorAll("button,input[type='button'],input[type='submit'],a"))
-                    .find(el => isSearchBridgeElementVisible(el) && /検索|次へ/.test(normalizeSearchBridgeText(el.textContent || el.value)));
-                if (searchButton) return clickSearchBridgeElement(searchButton);
+            if (isAraiSearchBridgeLoading()) {
+                if (!araiPendingLoadingStartedAt) araiPendingLoadingStartedAt = Date.now();
+
+                if (Date.now() - araiPendingLoadingStartedAt > 45 * 1000) {
+                    await chrome.storage.local.remove(getAraiSearchBridgeAdapter().pendingKey);
+                    araiPendingLoadingStartedAt = 0;
+                    showSiteSearchBridgeNotice(getAraiSearchBridgeAdapter(), "Arai search page did not finish loading", "error");
+                    return true;
+                }
+
+                setTimeout(() => processAraiSearchBridge(), 1000);
+                return true;
+            }
+
+            araiPendingLoadingStartedAt = 0;
+            if (hasAraiConditionSearchButton() && araiSearchBridgeFlow.conditionFormLoggedUrl !== location.href) {
+                araiSearchBridgeFlow.conditionFormLoggedUrl = location.href;
+                recordAraiSearchBridgeLog("条件フォーム到達", {
+                    targetMode: currentMode,
+                    beforeRestore: true
+                });
             }
 
             return false;
         }
 
-        function scheduleAraiVenueSearchAttempts() {
-            [250, 800, 1600, 2600].forEach(delay => {
-                setTimeout(() => {
-                    clickAraiVenueSearchIfReady();
-                }, delay);
-            });
-        }
+        async function submitAraiSearchBridge() {
+            if (isAraiVenueSelectionStep() && !hasAraiConditionSearchButton()) {
+                const result = await advanceAraiVenueSelection();
+                if (result.handled) return;
+            }
 
-        function submitAraiSearchBridge() {
-            if (clickAraiVenueSearchIfReady()) return;
-
-            const conditionButton = getVisibleAraiSearchButton(["btSearch", "btKaijo_exe"]) ||
+            const conditionButton = getVisibleAraiSearchButton(["btSearch", "btAppointed"]) ||
                 findVisibleSearchBridgeButtonByText("この条件で検索") ||
-                findVisibleSearchBridgeButtonByText("次へ");
+                (!isAraiVenueSelectionStep() ? findVisibleSearchBridgeButtonByText("次へ") : null);
 
-            if (isSearchBridgeElementVisible(conditionButton)) {
-                conditionButton.click();
-                scheduleAraiVenueSearchAttempts();
+            if (conditionButton) {
+                recordAraiSearchBridgeLog("検索実行", {
+                    buttonId: conditionButton?.id || "",
+                    buttonText: normalizeSearchBridgeText(conditionButton?.textContent || conditionButton?.value || "")
+                });
+                await markAraiSearchBridgeAwaitingResult({
+                    buttonId: conditionButton?.id || "",
+                    buttonText: normalizeSearchBridgeText(conditionButton?.textContent || conditionButton?.value || "")
+                });
+                clickSearchBridgeElement(conditionButton, true);
                 return;
             }
 
+            if (clickAraiVenueSearchIfReady()) return;
+
+            recordAraiSearchBridgeLog("失敗停止", { reason: "検索ボタンが見つかりません" });
             showSiteSearchBridgeNotice(getAraiSearchBridgeAdapter(), "検索ボタンが見つかりません", "error");
         }
 
@@ -2017,7 +2789,8 @@
                 storageKey: ARAI_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: ARAI_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "arai-search-bridge-ui",
-                position: { right: "12px", bottom: "78px" },
+                position: { right: "12px", top: "132px" },
+                launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.arai,
                 targetModes: ["listing", "market"],
                 shouldInstall: shouldInstallAraiSearchBridge,
@@ -2027,10 +2800,40 @@
                 isSearchMode: isAraiSearchBridgeMode,
                 canSaveCurrent: () => isAraiSearchBridgeMode(getAraiSearchBridgeMode()) && document.querySelectorAll("input,select,textarea").length > 0,
                 collectCondition: collectAraiSearchBridgeCondition,
+                appendPanelActions: (headerActions) => {
+                    headerActions.appendChild(createSiteSearchBridgeButton("Arai保留クリア", async () => {
+                        await clearAraiSearchBridgePending("panel_clear");
+                        showSiteSearchBridgeNotice(getAraiSearchBridgeAdapter(), "Araiの保留中検索をクリアしました");
+                    }));
+                    headerActions.appendChild(createSiteSearchBridgeButton("診断記録", async () => {
+                        runAraiKaijoSelectorAction("diagnose_state");
+                        recordAraiSearchBridgeLog("診断記録", { manual: true });
+                        showSiteSearchBridgeNotice(getAraiSearchBridgeAdapter(), "Arai診断を記録しました");
+                    }));
+                },
+                afterPendingCreated: async (pending, targetMode) => {
+                    resetAraiSearchBridgeFlow(pending);
+                    recordAraiSearchBridgeLog("pending作成", {
+                        pendingId: pending.id,
+                        targetMode,
+                        sourceMode: pending.condition?.sourceMode || ""
+                    });
+                },
+                afterPendingCleared: async (reason, pending) => {
+                    resetAraiSearchBridgeFlow();
+                    recordAraiSearchBridgeLog("保留クリア", {
+                        reason,
+                        pendingId: pending?.id || ""
+                    });
+                },
+                beforePendingRestore: handleAraiPendingBeforeRestore,
                 beforeRestore: activateAraiSearchBridgeConditionTab,
                 restoreCondition: restoreAraiSearchBridgeCondition,
                 getTargetUrl: getAraiSearchBridgeTargetUrl,
-                isRestoreReady: () => isAraiSearchBridgeMode(getAraiSearchBridgeMode()) && document.querySelectorAll("input,select,textarea").length > 0,
+                isRestoreReady: () => isAraiSearchBridgeMode(getAraiSearchBridgeMode()) &&
+                    !isAraiSearchBridgeLoading() &&
+                    hasAraiConditionSearchButton() &&
+                    document.querySelectorAll("input,select,textarea").length > 0,
                 submitSearch: submitAraiSearchBridge
             };
         }
@@ -2039,6 +2842,7 @@
             const adapter = getAraiSearchBridgeAdapter();
             installSiteSearchBridge(adapter);
             applySiteSearchBridgePending(adapter);
+            void logAraiSearchBridgeResultIfReady();
         }
 
         // ===== JU 検索条件ブリッジ =====
@@ -2047,20 +2851,27 @@
             return location.pathname.toLowerCase().replace(/\/+$/, "");
         }
 
+        function getJuSearchBridgeModeFromPath(path = getNormalizedJuSearchBridgePath()) {
+            if (path.endsWith("/junaviweb/carsearch") || path.endsWith("/junaviweb/searchlist")) return "listing";
+            if (path.endsWith("/junaviweb/marketpricesearch") || path.endsWith("/junaviweb/marketpricelist")) return "market";
+
+            return "";
+        }
+
         function getJuSearchBridgeModeFromForm(form) {
             const id = String(form?.id || "");
             const action = String(form?.action || "").toLowerCase();
 
-            if (id === "b5-Form" || /\/junaviweb\/carsearch(?:[/?#]|$)/i.test(action)) return "listing";
-            if (id === "b3-Form" || /\/junaviweb\/marketpricesearch(?:[/?#]|$)/i.test(action)) return "market";
+            if (id === "b5-Form" || /\/junaviweb\/(?:carsearch|searchlist)(?:[/?#]|$)/i.test(action)) return "listing";
+            if (id === "b3-Form" || id === "b4-Form" || /\/junaviweb\/marketprice(?:search|list)(?:[/?#]|$)/i.test(action)) return "market";
 
             return "";
         }
 
         function getJuSearchBridgeMode() {
             const path = getNormalizedJuSearchBridgePath();
-            if (path.endsWith("/junaviweb/carsearch")) return "listing";
-            if (path.endsWith("/junaviweb/marketpricesearch")) return "market";
+            const pathMode = getJuSearchBridgeModeFromPath(path);
+            if (pathMode) return pathMode;
 
             for (const form of Array.from(document.querySelectorAll("form"))) {
                 const mode = getJuSearchBridgeModeFromForm(form);
@@ -2086,7 +2897,9 @@
 
         function getJuSearchBridgeForm(mode = "") {
             const forms = Array.from(document.querySelectorAll("form"));
-            const exact = document.querySelector("#b5-Form") || document.querySelector("#b3-Form");
+            const exact = document.querySelector("#b5-Form") ||
+                document.querySelector("#b3-Form") ||
+                document.querySelector("#b4-Form");
             if (!mode && exact) return exact;
 
             const targetMode = mode || getJuSearchBridgeMode();
@@ -2096,6 +2909,11 @@
             }
 
             return exact || forms.find(form => /^b\d+-Form$/.test(form.id || "")) || forms[0] || null;
+        }
+
+        function isJuSearchBridgeSearchPage() {
+            const path = getNormalizedJuSearchBridgePath();
+            return path.endsWith("/junaviweb/carsearch") || path.endsWith("/junaviweb/marketpricesearch");
         }
 
         function shouldInstallJuSearchBridge() {
@@ -2116,12 +2934,20 @@
             return id || el.name || "";
         }
 
+        function isJuSearchBridgeConditionControl(el) {
+            if (!isSearchBridgeSavableControl(el)) return false;
+            if (/^b\d+-/.test(el.id || "")) return true;
+
+            return isJuSearchBridgeSearchPage();
+        }
+
         function collectJuSearchBridgeCondition() {
             const sourceMode = getJuSearchBridgeMode();
             const form = getJuSearchBridgeForm(sourceMode);
             if (!isJuSearchBridgeMode(sourceMode) || !form) return null;
 
             const fields = Array.from(form.querySelectorAll("input,select,textarea"))
+                .filter(el => isJuSearchBridgeConditionControl(el))
                 .map(el => {
                     const key = getJuSearchBridgeFieldKey(el);
                     if (!key) return null;
