@@ -257,8 +257,8 @@
 
         const MLIVE_SEARCH_MODE_LISTING = "1";
         const MLIVE_SEARCH_MODE_MARKET = "11";
-        const MLIVE_SEARCH_BRIDGE_VERSION = 2;
-        const MLIVE_SEARCH_BRIDGE_SLOT_IDS = ["1", "2", "3"];
+        const MLIVE_SEARCH_BRIDGE_VERSION = 3;
+        const MLIVE_SEARCH_BRIDGE_SLOT_IDS = ["1", "2", "3", "4", "5"];
         const MLIVE_SEARCH_BRIDGE_OLD_CONDITION_KEY = "mliveSearchBridgeCondition";
         const MLIVE_SEARCH_BRIDGE_SLOTS_KEY = "mliveSearchBridgeSlots";
         const MLIVE_SEARCH_BRIDGE_PENDING_KEY = "mliveSearchBridgePending";
@@ -547,6 +547,80 @@
             return btn;
         }
 
+        function normalizeSearchBridgeText(value) {
+            return String(value || "").replace(/\s+/g, " ").trim();
+        }
+
+        function getSearchBridgeSlotDefaultName(id) {
+            return `保存${id}`;
+        }
+
+        function normalizeSearchBridgeSlotName(value, id) {
+            const text = normalizeSearchBridgeText(value).slice(0, 24);
+            return text || getSearchBridgeSlotDefaultName(id);
+        }
+
+        function normalizeSearchBridgeSummary(summary) {
+            if (!Array.isArray(summary)) return [];
+
+            return summary
+                .map(item => normalizeSearchBridgeText(item).slice(0, 80))
+                .filter(Boolean)
+                .slice(0, 5);
+        }
+
+        function formatSearchBridgePreview(summary) {
+            const items = normalizeSearchBridgeSummary(summary);
+            return items.length > 0 ? items.join(" / ") : "内容なし";
+        }
+
+        function createSearchBridgeSlotNameElement(slot, renameHandler) {
+            const label = document.createElement("div");
+            label.textContent = normalizeSearchBridgeSlotName(slot.name, slot.id);
+            label.title = "ダブルクリックで名前変更";
+            label.style.fontWeight = "700";
+            label.style.cursor = "text";
+            label.style.overflow = "hidden";
+            label.style.textOverflow = "ellipsis";
+            label.style.whiteSpace = "nowrap";
+
+            label.addEventListener("dblclick", async () => {
+                const currentName = normalizeSearchBridgeSlotName(slot.name, slot.id);
+                const input = prompt("保存名を入力してください", currentName);
+                if (input === null) return;
+
+                const nextName = normalizeSearchBridgeSlotName(input, slot.id);
+                await renameHandler(nextName);
+            });
+
+            return label;
+        }
+
+        function createSearchBridgeSlotStatusBlock(metaText, previewText, titleText = "") {
+            const wrap = document.createElement("div");
+            wrap.style.minWidth = "0";
+
+            const meta = document.createElement("div");
+            meta.textContent = metaText;
+            meta.style.overflow = "hidden";
+            meta.style.textOverflow = "ellipsis";
+            meta.style.whiteSpace = "nowrap";
+            wrap.appendChild(meta);
+
+            const preview = document.createElement("div");
+            preview.textContent = previewText;
+            preview.title = titleText || previewText;
+            preview.style.marginTop = "2px";
+            preview.style.fontSize = "11px";
+            preview.style.color = "#4b5563";
+            preview.style.overflow = "hidden";
+            preview.style.textOverflow = "ellipsis";
+            preview.style.whiteSpace = "nowrap";
+            wrap.appendChild(preview);
+
+            return wrap;
+        }
+
         function formatMLiveSlotStatus(condition) {
             if (!condition) return "空";
 
@@ -559,6 +633,73 @@
             const mode = isMLiveBridgeMode(condition.sourceMode) ? getMLiveModeLabel(condition.sourceMode) : "条件";
 
             return `${mode} ${month}/${day} ${hour}:${minute}`;
+        }
+
+        function getMLiveConditionPreview(condition) {
+            if (!condition) return "未保存";
+
+            const summary = normalizeSearchBridgeSummary(condition.summary);
+            if (summary.length > 0) return formatSearchBridgePreview(summary);
+
+            const fields = condition.fields || {};
+            const items = [];
+
+            for (const [name, rawValues] of Object.entries(fields)) {
+                const values = (Array.isArray(rawValues) ? rawValues : [rawValues])
+                    .map(value => normalizeSearchBridgeText(value))
+                    .filter(Boolean);
+                if (values.length === 0) continue;
+
+                items.push(`${getMLiveFieldSummaryLabel(name)}:${values.slice(0, 2).join("/")}`);
+                if (items.length >= 5) break;
+            }
+
+            return formatSearchBridgePreview(items);
+        }
+
+        function getMLiveFieldSummaryLabel(name) {
+            return normalizeSearchBridgeText(name).replace(/^cond\./, "") || "条件";
+        }
+
+        function getMLiveControlDisplayText(control, value) {
+            if (!control) return normalizeSearchBridgeText(value);
+
+            const textValue = normalizeSearchBridgeText(value);
+            if (control.tagName === "SELECT") {
+                const option = Array.from(control.options || []).find(item => String(item.value ?? "") === String(value ?? ""));
+                return normalizeSearchBridgeText(option?.textContent || textValue);
+            }
+
+            if (control.type === "checkbox" || control.type === "radio") {
+                return normalizeSearchBridgeText(getSearchBridgeControlLabel(control) || textValue);
+            }
+
+            return textValue;
+        }
+
+        function buildMLiveConditionSummary(form, fields) {
+            const items = [];
+
+            for (const [name, rawValues] of Object.entries(fields || {})) {
+                const values = (Array.isArray(rawValues) ? rawValues : [rawValues])
+                    .map(value => normalizeSearchBridgeText(value))
+                    .filter(Boolean);
+                if (values.length === 0) continue;
+
+                const controls = getMLiveFormControls(form, name);
+                const displayValues = values
+                    .map(value => {
+                        const control = controls.find(item => String(item.value ?? "") === String(value ?? "")) || controls[0];
+                        return getMLiveControlDisplayText(control, value);
+                    })
+                    .filter(Boolean);
+
+                const label = getMLiveFieldSummaryLabel(name);
+                items.push(`${label}:${displayValues.slice(0, 2).join("/")}`);
+                if (items.length >= 5) break;
+            }
+
+            return normalizeSearchBridgeSummary(items);
         }
 
         function renderMLiveSlotLauncher(wrap, options) {
@@ -613,7 +754,7 @@
         function createMLiveSlotRow(wrap, slot, options) {
             const row = document.createElement("div");
             row.style.display = "grid";
-            row.style.gridTemplateColumns = options.allowSave ? "54px minmax(96px, 1fr) auto auto auto" : "54px minmax(96px, 1fr) auto auto auto";
+            row.style.gridTemplateColumns = options.allowSave ? "92px minmax(120px, 1fr) auto auto auto" : "92px minmax(120px, 1fr) auto auto auto";
             row.style.alignItems = "center";
             row.style.gap = "6px";
             row.style.padding = "6px";
@@ -621,18 +762,18 @@
             row.style.borderRadius = "6px";
             row.style.background = "#f9fafb";
 
-            const label = document.createElement("div");
-            label.textContent = `保存${slot.id}`;
-            label.style.fontWeight = "700";
-            row.appendChild(label);
+            row.appendChild(createSearchBridgeSlotNameElement(slot, async (nextName) => {
+                await renameMLiveSearchConditionSlot(slot.id, nextName);
+                showMLiveBridgeNotice(`保存${slot.id}の名前を変更しました`);
+                await renderMLiveSlotPanel(wrap, options);
+            }));
 
-            const status = document.createElement("div");
-            status.textContent = formatMLiveSlotStatus(slot.condition);
-            status.title = slot.condition?.sourceUrl || "";
-            status.style.overflow = "hidden";
-            status.style.textOverflow = "ellipsis";
-            status.style.whiteSpace = "nowrap";
-            row.appendChild(status);
+            const previewText = getMLiveConditionPreview(slot.condition);
+            row.appendChild(createSearchBridgeSlotStatusBlock(
+                formatMLiveSlotStatus(slot.condition),
+                previewText,
+                slot.condition?.sourceUrl || previewText
+            ));
 
             if (options.allowSave) {
                 row.appendChild(createMLiveBridgeButton("この条件を保存", async () => {
@@ -735,6 +876,7 @@
                 version: MLIVE_SEARCH_BRIDGE_VERSION,
                 sourceMode,
                 fields,
+                summary: buildMLiveConditionSummary(form, fields),
                 savedAt: Date.now(),
                 sourceUrl: location.href
             };
@@ -743,7 +885,11 @@
         function createEmptyMLiveSlotStore() {
             return {
                 version: MLIVE_SEARCH_BRIDGE_VERSION,
-                slots: MLIVE_SEARCH_BRIDGE_SLOT_IDS.map(id => ({ id, condition: null }))
+                slots: MLIVE_SEARCH_BRIDGE_SLOT_IDS.map(id => ({
+                    id,
+                    name: getSearchBridgeSlotDefaultName(id),
+                    condition: null
+                }))
             };
         }
 
@@ -755,6 +901,7 @@
                 version: MLIVE_SEARCH_BRIDGE_VERSION,
                 sourceMode: normalizeMLiveMode(condition.sourceMode),
                 fields: condition.fields,
+                summary: normalizeSearchBridgeSummary(condition.summary),
                 savedAt: Number.isFinite(savedAt) ? savedAt : Date.now(),
                 sourceUrl: condition.sourceUrl || ""
             };
@@ -769,6 +916,7 @@
                 const targetSlot = store.slots.find(item => item.id === id);
                 if (!targetSlot) continue;
 
+                targetSlot.name = normalizeSearchBridgeSlotName(slot.name || slot.title || slot.label, id);
                 targetSlot.condition = normalizeMLiveCondition(slot.condition);
             }
 
@@ -807,6 +955,16 @@
             slot.condition = condition;
             await chrome.storage.local.set({ [MLIVE_SEARCH_BRIDGE_SLOTS_KEY]: store });
             return condition;
+        }
+
+        async function renameMLiveSearchConditionSlot(slotId, name) {
+            const store = await getMLiveSearchSlotStore();
+            const slot = store.slots.find(item => item.id === String(slotId));
+            if (!slot) return null;
+
+            slot.name = normalizeSearchBridgeSlotName(name, slot.id);
+            await chrome.storage.local.set({ [MLIVE_SEARCH_BRIDGE_SLOTS_KEY]: store });
+            return slot.name;
         }
 
         async function deleteMLiveSearchConditionSlot(slotId) {
@@ -1095,7 +1253,7 @@
             }
         }
 
-        // ===== 共通 検索条件3枠ブリッジ (Arai/JU) =====
+        // ===== 共通 検索条件5枠ブリッジ (Arai/JU) =====
 
         function normalizeSiteSearchBridgeMode(value) {
             return String(value || "").trim();
@@ -1104,7 +1262,11 @@
         function createEmptySiteSearchBridgeSlotStore() {
             return {
                 version: MLIVE_SEARCH_BRIDGE_VERSION,
-                slots: MLIVE_SEARCH_BRIDGE_SLOT_IDS.map(id => ({ id, condition: null }))
+                slots: MLIVE_SEARCH_BRIDGE_SLOT_IDS.map(id => ({
+                    id,
+                    name: getSearchBridgeSlotDefaultName(id),
+                    condition: null
+                }))
             };
         }
 
@@ -1116,6 +1278,7 @@
                 version: MLIVE_SEARCH_BRIDGE_VERSION,
                 sourceMode: normalizeSiteSearchBridgeMode(condition.sourceMode),
                 fields: condition.fields.filter(Boolean),
+                summary: normalizeSearchBridgeSummary(condition.summary),
                 savedAt: Number.isFinite(savedAt) ? savedAt : Date.now(),
                 sourceUrl: condition.sourceUrl || ""
             };
@@ -1130,6 +1293,7 @@
                 const targetSlot = store.slots.find(item => item.id === id);
                 if (!targetSlot) continue;
 
+                targetSlot.name = normalizeSearchBridgeSlotName(slot.name || slot.title || slot.label, id);
                 targetSlot.condition = normalizeSiteSearchBridgeCondition(slot.condition);
             }
 
@@ -1155,6 +1319,16 @@
             slot.condition = condition;
             await chrome.storage.local.set({ [adapter.storageKey]: store });
             return condition;
+        }
+
+        async function renameSiteSearchBridgeConditionSlot(adapter, slotId, name) {
+            const store = await getSiteSearchBridgeSlotStore(adapter.storageKey);
+            const slot = store.slots.find(item => item.id === String(slotId));
+            if (!slot) return null;
+
+            slot.name = normalizeSearchBridgeSlotName(name, slot.id);
+            await chrome.storage.local.set({ [adapter.storageKey]: store });
+            return slot.name;
         }
 
         async function deleteSiteSearchBridgeConditionSlot(adapter, slotId) {
@@ -1266,6 +1440,35 @@
             return `${mode} ${month}/${day} ${hour}:${minute}`;
         }
 
+        function getSiteSearchBridgeConditionPreview(condition) {
+            if (!condition) return "未保存";
+
+            const summary = normalizeSearchBridgeSummary(condition.summary);
+            if (summary.length > 0) return formatSearchBridgePreview(summary);
+
+            return formatSearchBridgePreview(buildSiteSearchBridgeConditionSummary(condition.fields || []));
+        }
+
+        function buildSiteSearchBridgeConditionSummary(fields) {
+            const items = [];
+
+            for (const field of fields || []) {
+                if (!field) continue;
+
+                const type = String(field.type || "").toLowerCase();
+                if ((type === "checkbox" || type === "radio") && !field.checked) continue;
+
+                const label = normalizeSearchBridgeText(field.label || field.key || field.id || field.name || "条件");
+                const displayValue = normalizeSearchBridgeText(field.displayValue || field.selectedValues?.join("/") || field.value);
+                if (!displayValue) continue;
+
+                items.push(`${label}:${displayValue}`);
+                if (items.length >= 5) break;
+            }
+
+            return normalizeSearchBridgeSummary(items);
+        }
+
         function renderSiteSearchBridgeLauncher(wrap, adapter) {
             wrap.textContent = "";
             styleSiteSearchBridgeLauncher(wrap);
@@ -1331,7 +1534,7 @@
             const actionCount = targetModes.length + (allowSave ? 1 : 0) + 1;
 
             row.style.display = "grid";
-            row.style.gridTemplateColumns = `54px minmax(96px, 1fr) repeat(${actionCount}, auto)`;
+            row.style.gridTemplateColumns = `92px minmax(120px, 1fr) repeat(${actionCount}, auto)`;
             row.style.alignItems = "center";
             row.style.gap = "6px";
             row.style.padding = "6px";
@@ -1339,18 +1542,18 @@
             row.style.borderRadius = "6px";
             row.style.background = "#f9fafb";
 
-            const label = document.createElement("div");
-            label.textContent = `保存${slot.id}`;
-            label.style.fontWeight = "700";
-            row.appendChild(label);
+            row.appendChild(createSearchBridgeSlotNameElement(slot, async (nextName) => {
+                await renameSiteSearchBridgeConditionSlot(adapter, slot.id, nextName);
+                showSiteSearchBridgeNotice(adapter, `保存${slot.id}の名前を変更しました`);
+                await renderSiteSearchBridgePanel(wrap, adapter);
+            }));
 
-            const status = document.createElement("div");
-            status.textContent = formatSiteSearchBridgeSlotStatus(adapter, slot.condition);
-            status.title = slot.condition?.sourceUrl || "";
-            status.style.overflow = "hidden";
-            status.style.textOverflow = "ellipsis";
-            status.style.whiteSpace = "nowrap";
-            row.appendChild(status);
+            const previewText = getSiteSearchBridgeConditionPreview(slot.condition);
+            row.appendChild(createSearchBridgeSlotStatusBlock(
+                formatSiteSearchBridgeSlotStatus(adapter, slot.condition),
+                previewText,
+                slot.condition?.sourceUrl || previewText
+            ));
 
             if (allowSave) {
                 row.appendChild(createSiteSearchBridgeButton("この条件を保存", async () => {
@@ -1470,6 +1673,66 @@
             return /^(INPUT|SELECT|TEXTAREA)$/i.test(el.tagName);
         }
 
+        function getSearchBridgeControlLabel(el) {
+            if (!el) return "";
+
+            const candidates = [];
+            if (el.labels) {
+                Array.from(el.labels).forEach(label => candidates.push(label.textContent));
+            }
+
+            if (el.id) {
+                const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+                if (label) candidates.push(label.textContent);
+            }
+
+            candidates.push(
+                el.getAttribute("aria-label"),
+                el.getAttribute("placeholder"),
+                el.getAttribute("title")
+            );
+
+            const tableCell = el.closest("td,th");
+            const tableRow = el.closest("tr");
+            if (tableRow && tableCell) {
+                const cells = Array.from(tableRow.children);
+                const index = cells.indexOf(tableCell);
+                if (index > 0) candidates.push(cells[index - 1]?.textContent);
+            }
+
+            const parentText = el.closest("label,li,td,div")?.textContent;
+            candidates.push(parentText);
+
+            const labelText = candidates
+                .map(value => normalizeSearchBridgeText(value))
+                .find(value => value && value !== normalizeSearchBridgeText(el.value));
+
+            return labelText ? labelText.slice(0, 28) : "";
+        }
+
+        function getSearchBridgeControlDisplayValue(el) {
+            if (!el || !("value" in el)) return "";
+
+            const type = String(el.type || "").toLowerCase();
+            if (type === "checkbox" || type === "radio") {
+                if (!el.checked) return "";
+                return normalizeSearchBridgeText(getSearchBridgeControlLabel(el) || el.value);
+            }
+
+            if (el.tagName === "SELECT") {
+                const selectedOptions = el.multiple
+                    ? Array.from(el.selectedOptions)
+                    : Array.from(el.options || []).filter(option => option.selected);
+
+                return selectedOptions
+                    .map(option => normalizeSearchBridgeText(option.textContent || option.value))
+                    .filter(Boolean)
+                    .join("/");
+            }
+
+            return normalizeSearchBridgeText(el.value);
+        }
+
         function createSearchBridgeFieldRecord(el, extra = {}) {
             if (!isSearchBridgeSavableControl(el)) return null;
 
@@ -1480,6 +1743,8 @@
                 tag: String(el.tagName || "").toLowerCase(),
                 type,
                 value: "value" in el ? String(el.value ?? "") : "",
+                label: getSearchBridgeControlLabel(el),
+                displayValue: getSearchBridgeControlDisplayValue(el),
                 ...extra
             };
 
@@ -1527,10 +1792,6 @@
             }
 
             return candidates[0] || null;
-        }
-
-        function normalizeSearchBridgeText(value) {
-            return String(value || "").replace(/\s+/g, " ").trim();
         }
 
         function findSearchBridgeButtonByText(text, root = document) {
@@ -1595,6 +1856,7 @@
                 version: MLIVE_SEARCH_BRIDGE_VERSION,
                 sourceMode,
                 fields,
+                summary: buildSiteSearchBridgeConditionSummary(fields),
                 savedAt: Date.now(),
                 sourceUrl: location.href
             };
@@ -1730,6 +1992,7 @@
                 version: MLIVE_SEARCH_BRIDGE_VERSION,
                 sourceMode,
                 fields,
+                summary: buildSiteSearchBridgeConditionSummary(fields),
                 savedAt: Date.now(),
                 sourceUrl: location.href
             };
