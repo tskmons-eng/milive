@@ -110,44 +110,98 @@
         // ===== 共通ユーティリティ =====
 
         // ファイル名生成
-        function filenameFromUrl(url, fallback = "image.jpg") {
+        function sanitizeDownloadName(name, fallback = "image.jpg") {
+            const cleaned = (name || fallback)
+                .normalize("NFKC")
+                .replace(/[\u0000-\u001f\u007f]/g, "")
+                .replace(/[\\/:*?"<>|]/g, "_")
+                .replace(/\s+/g, "_")
+                .replace(/^\.+/, "")
+                .slice(0, 160);
+
+            return cleaned || fallback;
+        }
+
+        function filenameFromUrl(url, fallback = "image.jpg", forceImageExtension = false) {
             try {
                 const u = new URL(url);
                 const path = u.pathname;
-                const base = path.split("/").pop() || fallback;
-                return base;
+                let base = decodeURIComponent(path.split("/").pop() || fallback);
+
+                if (forceImageExtension && /\.(?:html?|php|cgi|asp)$/i.test(base)) {
+                    base = base.replace(/\.[^.]+$/, ".jpg");
+                }
+
+                if (forceImageExtension && !/\.(?:jpe?g|png|webp|gif|bmp)$/i.test(base)) {
+                    base = `${base}.jpg`;
+                }
+
+                return sanitizeDownloadName(base, fallback);
             } catch {
                 return fallback;
             }
         }
 
-        // ダウンロード (Backgroundへ依頼)
-        // ダウンロード (Backgroundへ依頼)
-        async function downloadOne(url, folderCode = "misc", explicitFilename = null) {
-            const filename = explicitFilename ? `${folderCode}/${explicitFilename}` : `${folderCode}/${filenameFromUrl(url)}`;
+        function imageExtensionFromUrl(url) {
+            const base = filenameFromUrl(url, "image.jpg", true);
+            const match = base.match(/\.(jpe?g|png|webp|gif|bmp)$/i);
+            if (!match) return ".jpg";
+
+            return `.${match[1].toLowerCase().replace("jpeg", "jpg")}`;
+        }
+
+        function imageDownloadHeaders() {
+            return [
+                { name: "Accept", value: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8" }
+            ];
+        }
+
+        function sendDownload(url, filename) {
             return new Promise((resolve) => {
                 chrome.runtime.sendMessage({
                     type: "download",
                     url: url,
-                    filename: filename
-                }, resolve);
+                    filename: filename,
+                    headers: imageDownloadHeaders()
+                }, response => {
+                    if (chrome.runtime.lastError) {
+                        resolve({ success: false, error: chrome.runtime.lastError.message });
+                        return;
+                    }
+
+                    resolve(response || { success: false, error: "No response from background script" });
+                });
             });
+        }
+
+        // ダウンロード (Backgroundへ依頼)
+        // ダウンロード (Backgroundへ依頼)
+        async function downloadOne(url, folderCode = "misc", explicitFilename = null) {
+            const base = explicitFilename
+                ? sanitizeDownloadName(explicitFilename)
+                : filenameFromUrl(url, "image.jpg", true);
+            const filename = `${folderCode}/${base}`;
+            const response = await sendDownload(url, filename);
+
+            if (!response?.success) {
+                console.warn("MLive Linkifier: download failed", JSON.stringify({ url, filename, response }));
+            }
+
+            return response;
         }
 
         async function downloadAll(urls, folderCode = "all") {
             for (let i = 0; i < urls.length; i++) {
                 const url = urls[i];
-                const base = filenameFromUrl(url, `image_${i + 1}.jpg`);
+                const base = filenameFromUrl(url, `image_${i + 1}.jpg`, true);
                 const num = String(i + 1).padStart(2, "0");
-                const filename = `${folderCode}/${num}_${base}`;
+                const response = await downloadOne(url, folderCode, `${num}_${base}`);
 
-                chrome.runtime.sendMessage({
-                    type: "download",
-                    url: url,
-                    filename: filename
-                });
+                if (!response?.success) {
+                    console.warn("MLive Linkifier: download-all item failed", JSON.stringify({ url, response }));
+                }
 
-                await new Promise(r => setTimeout(r, 200));
+                await new Promise(r => setTimeout(r, 800));
             }
         }
 
@@ -201,11 +255,32 @@
 
         // ===== サイト別実装: MLive =====
 
+        const MLIVE_SEARCH_MODE_LISTING = "1";
+        const MLIVE_SEARCH_MODE_MARKET = "11";
+        const MLIVE_SEARCH_BRIDGE_VERSION = 2;
+        const MLIVE_SEARCH_BRIDGE_SLOT_IDS = ["1", "2", "3"];
+        const MLIVE_SEARCH_BRIDGE_OLD_CONDITION_KEY = "mliveSearchBridgeCondition";
+        const MLIVE_SEARCH_BRIDGE_SLOTS_KEY = "mliveSearchBridgeSlots";
+        const MLIVE_SEARCH_BRIDGE_PENDING_KEY = "mliveSearchBridgePending";
+        const ARAI_SEARCH_BRIDGE_SLOTS_KEY = "araiSearchBridgeSlots";
+        const ARAI_SEARCH_BRIDGE_PENDING_KEY = "araiSearchBridgePending";
+        const JU_SEARCH_BRIDGE_SLOTS_KEY = "juSearchBridgeSlots";
+        const JU_SEARCH_BRIDGE_PENDING_KEY = "juSearchBridgePending";
+        const MLIVE_NORMAL_AA_CODES = new Set(["131", "220", "132"]);
+        let mliveSearchBridgePendingRunning = false;
+        let mliveSearchBridgePendingApplied = false;
+        const siteSearchBridgeState = {
+            arai: { pendingRunning: false, pendingApplied: false },
+            ju: { pendingRunning: false, pendingApplied: false }
+        };
+
         function processMLive() {
             // リンク化
             processOnce();
 
             processMLiveAutoSelect();
+
+            processMLiveSearchBridge();
 
             // ボタン表示
             const boxId = "mlive-save-ui";
@@ -213,10 +288,13 @@
 
             // 画像URL収集
             function collect() {
-                const anchors = Array.from(document.querySelectorAll('a[data-fancybox^="gallery"][href]'));
+                const anchorsAll = Array.from(document.querySelectorAll('a[data-fancybox^="gallery"][href]'));
+                const visibleAnchors = anchorsAll.filter(a => a.offsetWidth || a.offsetHeight || a.getClientRects().length);
+                const anchors = visibleAnchors.length > 0 ? visibleAnchors : anchorsAll;
                 const urls = anchors
                     .map(a => a.getAttribute("href"))
                     .filter(Boolean)
+                    .filter(u => !/\/no_image/i.test(u))
                     .map(u => {
                         try { return new URL(u, location.href).toString(); } catch { return null; }
                     })
@@ -224,25 +302,1508 @@
                 return Array.from(new Set(urls));
             }
 
-            const initialUrls = collect();
-            if (initialUrls.length === 0) return;
+            function isMLiveSheetImageUrl(url) {
+                try {
+                    return /\/pict\/d\//i.test(new URL(url, location.href).pathname);
+                } catch {
+                    return false;
+                }
+            }
+
+            function collectMLiveImageSets() {
+                const allUrls = collect();
+                const sheetUrl = allUrls.find(isMLiveSheetImageUrl) || "";
+                const vehicleUrls = sheetUrl ? allUrls.filter(url => url !== sheetUrl) : allUrls;
+
+                return { allUrls, vehicleUrls, sheetUrl };
+            }
+
+            function getMLiveTableValue(labelText) {
+                for (const row of Array.from(document.querySelectorAll("tr"))) {
+                    const cells = Array.from(row.children);
+                    if (cells.length < 2) continue;
+
+                    const label = (cells[0].textContent || "").replace(/\s+/g, "");
+                    if (!label.includes(labelText)) continue;
+
+                    const value = (cells[1].textContent || "").replace(/\s+/g, " ").trim();
+                    if (value) return value;
+                }
+
+                return "";
+            }
+
+            function getMLiveSaveMeta() {
+                const params = new URL(location.href).searchParams;
+                const auctionNo = (getMLiveTableValue("出品番号") || params.get("seriNo") || "").replace(/\s*号車$/, "").trim();
+                const carName = getMLiveTableValue("車名") || "";
+                const saveBase = sanitizeDownloadName([auctionNo, carName].filter(Boolean).join("_"), "mlive_unknown");
+
+                if (!auctionNo || !carName) {
+                    console.warn("MLive Linkifier: MLive save name is missing a field", { auctionNo, carName, saveBase });
+                }
+
+                return {
+                    filenameBase: saveBase,
+                    folderCode: `mlive/${saveBase}`
+                };
+            }
+
+            async function downloadMLiveImages(urls, saveMeta) {
+                for (let i = 0; i < urls.length; i++) {
+                    const num = String(i + 1).padStart(2, "0");
+                    const extension = imageExtensionFromUrl(urls[i]);
+                    await downloadOne(urls[i], saveMeta.folderCode, `${saveMeta.filenameBase}_${num}${extension}`);
+                    await new Promise(r => setTimeout(r, 250));
+                }
+            }
+
+            async function downloadMLiveFullSet(imageSets, saveMeta) {
+                if (imageSets.sheetUrl) {
+                    await downloadOne(imageSets.sheetUrl, saveMeta.folderCode, `${saveMeta.filenameBase}_出品票.jpg`);
+                    await new Promise(r => setTimeout(r, 250));
+                }
+
+                if (imageSets.vehicleUrls.length > 0) {
+                    await downloadMLiveImages(imageSets.vehicleUrls, saveMeta);
+                }
+            }
+
+            const initialImages = collectMLiveImageSets();
+            if (initialImages.allUrls.length === 0) return;
 
             const wrap = createFloatingContainer(boxId);
             if (!wrap) return;
 
             // ①枚目
             wrap.appendChild(createButton("出品票保存", async () => {
-                const current = collect();
-                if (current.length === 0) return;
-                await downloadOne(current[0], "mlive");
+                const current = collectMLiveImageSets();
+                if (!current.sheetUrl) {
+                    console.warn("MLive Linkifier: MLive sheet image was not found");
+                    return;
+                }
+
+                const saveMeta = getMLiveSaveMeta();
+                await downloadOne(current.sheetUrl, saveMeta.folderCode, `${saveMeta.filenameBase}_出品票.jpg`);
+            }));
+
+            wrap.appendChild(createButton("Pickup(車6+票)", async () => {
+                const current = collectMLiveImageSets();
+                if (current.vehicleUrls.length === 0 && !current.sheetUrl) return;
+
+                const saveMeta = getMLiveSaveMeta();
+                await downloadMLiveImages(current.vehicleUrls.slice(0, 6), saveMeta);
+
+                if (current.sheetUrl) {
+                    await downloadOne(current.sheetUrl, saveMeta.folderCode, `${saveMeta.filenameBase}_出品票.jpg`);
+                }
             }));
 
             // 全画像
-            wrap.appendChild(createButton(`全画像保存(${initialUrls.length})`, async () => {
-                const current = collect();
-                if (current.length === 0) return;
-                await downloadAll(current, "mlive/all");
+            wrap.appendChild(createButton(`全保存(票+車${initialImages.vehicleUrls.length})`, async () => {
+                const current = collectMLiveImageSets();
+                if (current.vehicleUrls.length === 0 && !current.sheetUrl) return;
+                await downloadMLiveFullSet(current, getMLiveSaveMeta());
             }));
+        }
+
+        function processMLiveSearchBridge() {
+            if (!document.body) return;
+
+            if (isMLiveSearchCarPage()) {
+                installMLiveSearchCarBridge();
+                applyPendingMLiveBridgeSearch();
+                return;
+            }
+
+            if (isMLiveMyCarBridgePage() || isMLiveDetailPage()) {
+                installMLiveSavedSearchBridge();
+            }
+        }
+
+        function isMLiveSearchCarPage() {
+            return location.pathname.includes("/SearchCar");
+        }
+
+        function isMLiveMyCarBridgePage() {
+            if (!location.pathname.includes("/MyCar")) return false;
+
+            const mode = getMLivePageSearchMode();
+            return isMLiveBridgeMode(mode);
+        }
+
+        function isMLiveDetailPage() {
+            return location.pathname.includes("/CarDetail");
+        }
+
+        function normalizeMLiveMode(value) {
+            return String(value || "").trim();
+        }
+
+        function isMLiveBridgeMode(mode) {
+            return mode === MLIVE_SEARCH_MODE_LISTING || mode === MLIVE_SEARCH_MODE_MARKET;
+        }
+
+        function getMLiveOppositeMode(mode) {
+            return mode === MLIVE_SEARCH_MODE_MARKET ? MLIVE_SEARCH_MODE_LISTING : MLIVE_SEARCH_MODE_MARKET;
+        }
+
+        function getMLiveModeLabel(mode) {
+            return mode === MLIVE_SEARCH_MODE_MARKET ? "相場" : "出品";
+        }
+
+        function getMLiveSearchForm() {
+            return document.querySelector("form#searchForm");
+        }
+
+        function getMLivePageSearchMode(form = null) {
+            const scopedForm = form || getMLiveSearchForm();
+            const fieldMode = scopedForm?.querySelector('[name="cond.SearchMode"]')?.value ||
+                document.querySelector('[name="cond.SearchMode"]')?.value ||
+                document.querySelector('[name="SearchMode"]')?.value ||
+                "";
+            const params = new URL(location.href).searchParams;
+            const paramMode = params.get("SearchMode") || params.get("searchMode") || "";
+
+            return normalizeMLiveMode(fieldMode || paramMode);
+        }
+
+        function createMLiveBridgeContainer(id) {
+            if (document.getElementById(id)) return null;
+
+            const wrap = document.createElement("div");
+            wrap.id = id;
+            wrap.style.position = "fixed";
+            wrap.style.top = "58px";
+            wrap.style.right = "12px";
+            wrap.style.zIndex = "999998";
+            wrap.style.display = "flex";
+            wrap.style.flexWrap = "wrap";
+            wrap.style.justifyContent = "flex-end";
+            wrap.style.gap = "0";
+            wrap.style.maxWidth = "calc(100vw - 24px)";
+            document.body.appendChild(wrap);
+            return wrap;
+        }
+
+        function createMLiveBridgePanel(id) {
+            if (document.getElementById(id)) return null;
+
+            const wrap = document.createElement("div");
+            wrap.id = id;
+            wrap.style.position = "fixed";
+            wrap.style.top = "58px";
+            wrap.style.right = "12px";
+            wrap.style.zIndex = "999998";
+            wrap.style.fontFamily = "sans-serif";
+            wrap.style.fontSize = "12px";
+            document.body.appendChild(wrap);
+            return wrap;
+        }
+
+        function styleMLiveBridgeLauncher(wrap) {
+            wrap.style.display = "block";
+            wrap.style.width = "auto";
+            wrap.style.maxHeight = "";
+            wrap.style.overflow = "visible";
+            wrap.style.padding = "0";
+            wrap.style.border = "none";
+            wrap.style.borderRadius = "0";
+            wrap.style.background = "transparent";
+            wrap.style.boxShadow = "none";
+            wrap.style.color = "#111827";
+        }
+
+        function styleMLiveBridgeExpandedPanel(wrap) {
+            wrap.style.display = "flex";
+            wrap.style.flexDirection = "column";
+            wrap.style.gap = "6px";
+            wrap.style.width = "min(520px, calc(100vw - 24px))";
+            wrap.style.maxHeight = "calc(100vh - 90px)";
+            wrap.style.overflow = "auto";
+            wrap.style.padding = "8px";
+            wrap.style.border = "1px solid rgba(0,0,0,0.18)";
+            wrap.style.borderRadius = "8px";
+            wrap.style.background = "rgba(255,255,255,0.98)";
+            wrap.style.boxShadow = "0 3px 14px rgba(0,0,0,0.18)";
+            wrap.style.color = "#111827";
+        }
+
+        function createMLiveBridgeButton(text, onClick, disabled = false) {
+            const btn = createButton(text, onClick);
+            btn.style.padding = "6px 8px";
+            btn.style.borderRadius = "6px";
+            btn.style.fontSize = "12px";
+            btn.style.marginRight = "0";
+            btn.style.boxShadow = "none";
+            btn.style.whiteSpace = "nowrap";
+
+            if (disabled) {
+                btn.disabled = true;
+                btn.style.opacity = "0.45";
+                btn.style.cursor = "default";
+            }
+
+            return btn;
+        }
+
+        function formatMLiveSlotStatus(condition) {
+            if (!condition) return "空";
+
+            const savedAt = Number(condition.savedAt || 0);
+            const date = new Date(Number.isFinite(savedAt) && savedAt > 0 ? savedAt : Date.now());
+            const month = String(date.getMonth() + 1).padStart(2, "0");
+            const day = String(date.getDate()).padStart(2, "0");
+            const hour = String(date.getHours()).padStart(2, "0");
+            const minute = String(date.getMinutes()).padStart(2, "0");
+            const mode = isMLiveBridgeMode(condition.sourceMode) ? getMLiveModeLabel(condition.sourceMode) : "条件";
+
+            return `${mode} ${month}/${day} ${hour}:${minute}`;
+        }
+
+        function renderMLiveSlotLauncher(wrap, options) {
+            wrap.textContent = "";
+            styleMLiveBridgeLauncher(wrap);
+
+            const btn = createMLiveBridgeButton("条件保存", async () => {
+                await renderMLiveSlotPanel(wrap, options);
+            });
+            btn.style.padding = "8px 10px";
+            btn.style.borderRadius = "18px";
+            btn.style.fontWeight = "700";
+            btn.style.boxShadow = "0 2px 10px rgba(0,0,0,0.18)";
+            wrap.appendChild(btn);
+        }
+
+        async function renderMLiveSlotPanel(wrap, options) {
+            styleMLiveBridgeExpandedPanel(wrap);
+            wrap.textContent = "保存条件を読み込み中...";
+
+            try {
+                const store = await getMLiveSearchSlotStore();
+                wrap.textContent = "";
+
+                const header = document.createElement("div");
+                header.style.display = "flex";
+                header.style.alignItems = "center";
+                header.style.justifyContent = "space-between";
+                header.style.gap = "8px";
+                header.style.marginBottom = "2px";
+
+                const title = document.createElement("div");
+                title.textContent = "MLive条件保存";
+                title.style.fontWeight = "700";
+                header.appendChild(title);
+
+                header.appendChild(createMLiveBridgeButton("閉じる", async () => {
+                    renderMLiveSlotLauncher(wrap, options);
+                }));
+
+                wrap.appendChild(header);
+
+                for (const slot of store.slots) {
+                    wrap.appendChild(createMLiveSlotRow(wrap, slot, options));
+                }
+            } catch (error) {
+                console.warn("MLive Linkifier: slot panel render failed", error);
+                wrap.textContent = "保存条件を読み込めませんでした";
+            }
+        }
+
+        function createMLiveSlotRow(wrap, slot, options) {
+            const row = document.createElement("div");
+            row.style.display = "grid";
+            row.style.gridTemplateColumns = options.allowSave ? "54px minmax(96px, 1fr) auto auto auto" : "54px minmax(96px, 1fr) auto auto auto";
+            row.style.alignItems = "center";
+            row.style.gap = "6px";
+            row.style.padding = "6px";
+            row.style.border = "1px solid rgba(0,0,0,0.1)";
+            row.style.borderRadius = "6px";
+            row.style.background = "#f9fafb";
+
+            const label = document.createElement("div");
+            label.textContent = `保存${slot.id}`;
+            label.style.fontWeight = "700";
+            row.appendChild(label);
+
+            const status = document.createElement("div");
+            status.textContent = formatMLiveSlotStatus(slot.condition);
+            status.title = slot.condition?.sourceUrl || "";
+            status.style.overflow = "hidden";
+            status.style.textOverflow = "ellipsis";
+            status.style.whiteSpace = "nowrap";
+            row.appendChild(status);
+
+            if (options.allowSave) {
+                row.appendChild(createMLiveBridgeButton("この条件を保存", async () => {
+                    const condition = await saveMLiveSearchConditionSlot(options.form, slot.id);
+                    if (condition) showMLiveBridgeNotice(`保存${slot.id}に保存しました`);
+                    await renderMLiveSlotPanel(wrap, options);
+                }));
+
+                const targetMode = getMLiveOppositeMode(options.currentMode);
+                row.appendChild(createMLiveBridgeButton(`${getMLiveModeLabel(targetMode)}へ`, async () => {
+                    await startMLiveBridgeSearch(targetMode, slot.condition);
+                }, !slot.condition));
+            } else {
+                row.appendChild(createMLiveBridgeButton("相場へ", async () => {
+                    await startMLiveBridgeSearch(MLIVE_SEARCH_MODE_MARKET, slot.condition);
+                }, !slot.condition));
+
+                row.appendChild(createMLiveBridgeButton("出品へ", async () => {
+                    await startMLiveBridgeSearch(MLIVE_SEARCH_MODE_LISTING, slot.condition);
+                }, !slot.condition));
+            }
+
+            row.appendChild(createMLiveBridgeButton("削除", async () => {
+                await deleteMLiveSearchConditionSlot(slot.id);
+                showMLiveBridgeNotice(`保存${slot.id}を削除しました`);
+                await renderMLiveSlotPanel(wrap, options);
+            }, !slot.condition));
+
+            return row;
+        }
+
+        function showMLiveBridgeNotice(message, type = "info") {
+            const old = document.getElementById("mlive-search-bridge-notice");
+            if (old) old.remove();
+
+            const notice = document.createElement("div");
+            notice.id = "mlive-search-bridge-notice";
+            notice.textContent = message;
+            notice.style.position = "fixed";
+            notice.style.right = "16px";
+            notice.style.bottom = "16px";
+            notice.style.zIndex = "1000000";
+            notice.style.maxWidth = "min(420px, calc(100vw - 32px))";
+            notice.style.padding = "10px 12px";
+            notice.style.borderRadius = "8px";
+            notice.style.boxShadow = "0 4px 18px rgba(0,0,0,0.25)";
+            notice.style.fontSize = "13px";
+            notice.style.lineHeight = "1.4";
+            notice.style.fontFamily = "sans-serif";
+            notice.style.color = "white";
+            notice.style.background = type === "error" ? "#b91c1c" : "#1f2937";
+            document.body.appendChild(notice);
+
+            setTimeout(() => notice.remove(), 4500);
+        }
+
+        function isMLiveSavableConditionName(name) {
+            if (!name || !name.startsWith("cond.")) return false;
+            if (name === "cond.SearchMode") return false;
+
+            return ![
+                "cond.AaCode",
+                "cond.BeforeAaCode",
+                "cond.AucNoFrom",
+                "cond.AucNoTo"
+            ].includes(name);
+        }
+
+        function addMLiveConditionValue(fields, name, value) {
+            if (!isMLiveSavableConditionName(name)) return;
+            if (!fields[name]) fields[name] = [];
+            fields[name].push(String(value ?? ""));
+        }
+
+        function collectMLiveSearchCondition(form) {
+            const sourceMode = getMLivePageSearchMode(form);
+            const fields = {};
+
+            for (const el of Array.from(form.elements)) {
+                if (!isMLiveSavableConditionName(el.name)) continue;
+                if (el.disabled) continue;
+                if (/^(button|submit|reset|file)$/i.test(el.type || "")) continue;
+
+                if (el.type === "checkbox" || el.type === "radio") {
+                    if (el.checked) addMLiveConditionValue(fields, el.name, el.value);
+                    continue;
+                }
+
+                if (el.tagName === "SELECT" && el.multiple) {
+                    Array.from(el.selectedOptions).forEach(option => {
+                        addMLiveConditionValue(fields, el.name, option.value);
+                    });
+                    continue;
+                }
+
+                addMLiveConditionValue(fields, el.name, el.value);
+            }
+
+            return {
+                version: MLIVE_SEARCH_BRIDGE_VERSION,
+                sourceMode,
+                fields,
+                savedAt: Date.now(),
+                sourceUrl: location.href
+            };
+        }
+
+        function createEmptyMLiveSlotStore() {
+            return {
+                version: MLIVE_SEARCH_BRIDGE_VERSION,
+                slots: MLIVE_SEARCH_BRIDGE_SLOT_IDS.map(id => ({ id, condition: null }))
+            };
+        }
+
+        function normalizeMLiveCondition(condition) {
+            if (!condition || !condition.fields) return null;
+            const savedAt = Number(condition.savedAt || Date.now());
+
+            return {
+                version: MLIVE_SEARCH_BRIDGE_VERSION,
+                sourceMode: normalizeMLiveMode(condition.sourceMode),
+                fields: condition.fields,
+                savedAt: Number.isFinite(savedAt) ? savedAt : Date.now(),
+                sourceUrl: condition.sourceUrl || ""
+            };
+        }
+
+        function normalizeMLiveSlotStore(value) {
+            const store = createEmptyMLiveSlotStore();
+            if (!value || !Array.isArray(value.slots)) return store;
+
+            for (const slot of value.slots) {
+                const id = String(slot?.id || "");
+                const targetSlot = store.slots.find(item => item.id === id);
+                if (!targetSlot) continue;
+
+                targetSlot.condition = normalizeMLiveCondition(slot.condition);
+            }
+
+            return store;
+        }
+
+        async function getMLiveSearchSlotStore() {
+            const result = await chrome.storage.local.get([
+                MLIVE_SEARCH_BRIDGE_SLOTS_KEY,
+                MLIVE_SEARCH_BRIDGE_OLD_CONDITION_KEY
+            ]);
+            const store = normalizeMLiveSlotStore(result[MLIVE_SEARCH_BRIDGE_SLOTS_KEY]);
+            const hasSavedSlot = store.slots.some(slot => slot.condition);
+            const oldCondition = normalizeMLiveCondition(result[MLIVE_SEARCH_BRIDGE_OLD_CONDITION_KEY]);
+
+            if (!hasSavedSlot && oldCondition) {
+                store.slots[0].condition = oldCondition;
+                await chrome.storage.local.set({ [MLIVE_SEARCH_BRIDGE_SLOTS_KEY]: store });
+                await chrome.storage.local.remove(MLIVE_SEARCH_BRIDGE_OLD_CONDITION_KEY);
+            }
+
+            return store;
+        }
+
+        async function saveMLiveSearchConditionSlot(form, slotId) {
+            if (!form) {
+                showMLiveBridgeNotice("検索条件フォームが見つかりませんでした", "error");
+                return null;
+            }
+
+            const condition = collectMLiveSearchCondition(form);
+            const store = await getMLiveSearchSlotStore();
+            const slot = store.slots.find(item => item.id === String(slotId));
+            if (!slot) return null;
+
+            slot.condition = condition;
+            await chrome.storage.local.set({ [MLIVE_SEARCH_BRIDGE_SLOTS_KEY]: store });
+            return condition;
+        }
+
+        async function deleteMLiveSearchConditionSlot(slotId) {
+            const store = await getMLiveSearchSlotStore();
+            const slot = store.slots.find(item => item.id === String(slotId));
+            if (!slot) return null;
+
+            slot.condition = null;
+            await chrome.storage.local.set({ [MLIVE_SEARCH_BRIDGE_SLOTS_KEY]: store });
+            return store;
+        }
+
+        async function startMLiveBridgeSearch(targetMode, condition = null) {
+            const savedCondition = normalizeMLiveCondition(condition);
+
+            if (!savedCondition) {
+                showMLiveBridgeNotice("保存条件が空です", "error");
+                return;
+            }
+
+            const pending = {
+                version: MLIVE_SEARCH_BRIDGE_VERSION,
+                targetMode,
+                condition: savedCondition,
+                createdAt: Date.now(),
+                sourceUrl: location.href
+            };
+            const url = new URL("/MLiveWebMember/SearchCar", location.origin);
+            url.searchParams.set("SearchMode", targetMode);
+
+            await chrome.storage.local.set({
+                [MLIVE_SEARCH_BRIDGE_PENDING_KEY]: pending
+            });
+
+            location.href = url.toString();
+        }
+
+        function installMLiveSearchCarBridge() {
+            const form = getMLiveSearchForm();
+            if (!form) return;
+
+            const mode = getMLivePageSearchMode(form);
+            if (!isMLiveBridgeMode(mode)) return;
+            if (document.getElementById("mlive-search-bridge-ui")) return;
+
+            const wrap = createMLiveBridgePanel("mlive-search-bridge-ui");
+            if (!wrap) return;
+
+            renderMLiveSlotLauncher(wrap, {
+                form,
+                currentMode: mode,
+                allowSave: true,
+                showBothTargets: false
+            });
+        }
+
+        function installMLiveSavedSearchBridge() {
+            if (document.getElementById("mlive-search-bridge-saved-ui")) return;
+
+            const wrap = createMLiveBridgePanel("mlive-search-bridge-saved-ui");
+            if (!wrap) return;
+
+            renderMLiveSlotLauncher(wrap, {
+                form: null,
+                currentMode: getMLivePageSearchMode(),
+                allowSave: false,
+                showBothTargets: true
+            });
+        }
+
+        async function applyPendingMLiveBridgeSearch() {
+            if (mliveSearchBridgePendingRunning || mliveSearchBridgePendingApplied) return;
+
+            const form = getMLiveSearchForm();
+            if (!form) return;
+
+            const mode = getMLivePageSearchMode(form);
+            if (!isMLiveBridgeMode(mode)) return;
+
+            mliveSearchBridgePendingRunning = true;
+            try {
+                const result = await chrome.storage.local.get(MLIVE_SEARCH_BRIDGE_PENDING_KEY);
+                const pending = result[MLIVE_SEARCH_BRIDGE_PENDING_KEY];
+                if (!pending) return;
+                if (pending.version !== MLIVE_SEARCH_BRIDGE_VERSION || !pending.condition) {
+                    await chrome.storage.local.remove(MLIVE_SEARCH_BRIDGE_PENDING_KEY);
+                    return;
+                }
+
+                if (Date.now() - Number(pending.createdAt || 0) > 10 * 60 * 1000) {
+                    await chrome.storage.local.remove(MLIVE_SEARCH_BRIDGE_PENDING_KEY);
+                    return;
+                }
+
+                if (normalizeMLiveMode(pending.targetMode) !== mode) return;
+
+                resetMLiveSearchFormCondition(form);
+                applyMLiveConditionToForm(form, pending.condition.fields, mode);
+                setMLiveFieldValue(form, "cond.SearchMode", mode);
+                setMLiveFieldValue(form, "ActionMode", "Search");
+                setMLiveFieldValue(form, "pageVm.CurrentPage", "1");
+                setMLiveFieldValue(form, "pageVm.SortField", "");
+                setMLiveFieldValue(form, "pageVm.SortOrder", "");
+                setMLiveFieldValue(form, "pageVm.DispType", "1");
+
+                mliveSearchBridgePendingApplied = true;
+                await chrome.storage.local.remove(MLIVE_SEARCH_BRIDGE_PENDING_KEY);
+
+                showMLiveBridgeNotice(`保存条件で${getMLiveModeLabel(mode)}検索します`);
+                setTimeout(() => submitMLiveSearchForm(form), 80);
+            } catch (error) {
+                console.warn("MLive Linkifier: pending bridge search failed", error);
+                showMLiveBridgeNotice("保存条件の検索に失敗しました", "error");
+            } finally {
+                mliveSearchBridgePendingRunning = false;
+            }
+        }
+
+        function resetMLiveSearchFormCondition(form) {
+            form.querySelectorAll('[data-mlive-bridge-hidden="1"]').forEach(el => el.remove());
+
+            for (const el of Array.from(form.elements)) {
+                if (!isMLiveSavableConditionName(el.name)) continue;
+                if (/^(button|submit|reset)$/i.test(el.type || "")) continue;
+
+                if (el.type === "checkbox" || el.type === "radio") {
+                    el.checked = false;
+                } else if (el.tagName === "SELECT") {
+                    if (el.multiple) {
+                        Array.from(el.options).forEach(option => { option.selected = false; });
+                    } else {
+                        el.value = "";
+                        if (el.value !== "") el.selectedIndex = 0;
+                    }
+                } else {
+                    el.value = "";
+                }
+            }
+        }
+
+        function applyMLiveConditionToForm(form, fields, targetMode) {
+            const compatibleFields = getMLiveCompatibleConditionFields(fields, targetMode);
+
+            for (const [name, values] of Object.entries(compatibleFields)) {
+                applyMLiveConditionField(form, name, values);
+            }
+        }
+
+        function getMLiveCompatibleConditionFields(fields, targetMode) {
+            const compatible = {};
+
+            for (const [name, rawValues] of Object.entries(fields || {})) {
+                if (!isMLiveSavableConditionName(name)) continue;
+
+                const values = Array.isArray(rawValues) ? rawValues : [rawValues];
+                const mappedValues = name === "cond.LstAaCode"
+                    ? values.map(value => mapMLiveAaCodeForTarget(value, targetMode)).filter(Boolean)
+                    : values.map(value => String(value ?? ""));
+
+                const uniqueValues = Array.from(new Set(mappedValues));
+                if (uniqueValues.length > 0) compatible[name] = uniqueValues;
+            }
+
+            return compatible;
+        }
+
+        function mapMLiveAaCodeForTarget(value, targetMode) {
+            const text = String(value || "").trim();
+            if (!text) return "";
+
+            if (targetMode === MLIVE_SEARCH_MODE_MARKET) {
+                if (text.includes("|")) {
+                    const [kind, aaCode] = text.split("|");
+                    if (kind === aaCode && MLIVE_NORMAL_AA_CODES.has(aaCode)) return aaCode;
+                    return "";
+                }
+
+                return MLIVE_NORMAL_AA_CODES.has(text) ? text : "";
+            }
+
+            if (targetMode === MLIVE_SEARCH_MODE_LISTING) {
+                if (text.includes("|")) {
+                    const [kind, aaCode] = text.split("|");
+                    if (kind === aaCode && MLIVE_NORMAL_AA_CODES.has(aaCode)) return text;
+                    return "";
+                }
+
+                return MLIVE_NORMAL_AA_CODES.has(text) ? `${text}|${text}` : "";
+            }
+
+            return text;
+        }
+
+        function getMLiveFormControls(form, name) {
+            const controls = form.elements[name];
+            if (!controls) return [];
+            if (controls instanceof Element) return [controls];
+
+            return Array.from(controls).filter(Boolean);
+        }
+
+        function applyMLiveConditionField(form, name, values) {
+            const controls = getMLiveFormControls(form, name);
+            const stringValues = values.map(value => String(value ?? ""));
+
+            if (controls.length === 0) {
+                appendMLiveHiddenValues(form, name, stringValues);
+                return;
+            }
+
+            const first = controls[0];
+            if (first.type === "checkbox" || first.type === "radio") {
+                const matched = new Set();
+
+                for (const control of controls) {
+                    const shouldCheck = stringValues.includes(control.value);
+                    control.checked = shouldCheck;
+                    if (shouldCheck) matched.add(control.value);
+                    dispatchMLiveChangeEvents(control);
+                }
+
+                const missingValues = stringValues.filter(value => value && !matched.has(value));
+                appendMLiveHiddenValues(form, name, missingValues);
+                return;
+            }
+
+            if (first.tagName === "SELECT") {
+                if (first.multiple) {
+                    Array.from(first.options).forEach(option => {
+                        option.selected = stringValues.includes(option.value);
+                    });
+                } else {
+                    first.value = stringValues[0] || "";
+                }
+                dispatchMLiveChangeEvents(first);
+                return;
+            }
+
+            if (controls.length === 1) {
+                first.value = stringValues[0] || "";
+                dispatchMLiveChangeEvents(first);
+                return;
+            }
+
+            controls.forEach((control, index) => {
+                control.value = stringValues[index] || "";
+                dispatchMLiveChangeEvents(control);
+            });
+            appendMLiveHiddenValues(form, name, stringValues.slice(controls.length));
+        }
+
+        function appendMLiveHiddenValues(form, name, values) {
+            values.filter(value => value !== "").forEach(value => {
+                const input = document.createElement("input");
+                input.type = "hidden";
+                input.name = name;
+                input.value = value;
+                input.dataset.mliveBridgeHidden = "1";
+                form.appendChild(input);
+            });
+        }
+
+        function setMLiveFieldValue(form, name, value) {
+            const controls = getMLiveFormControls(form, name);
+            const target = controls[0];
+            if (!target) return;
+
+            target.value = value;
+            dispatchMLiveChangeEvents(target);
+        }
+
+        function dispatchMLiveChangeEvents(el) {
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+
+        function submitMLiveSearchForm(form) {
+            const submitter = form.querySelector("#searchBtn") || form.querySelector('[type="submit"]');
+
+            if (typeof form.requestSubmit === "function") {
+                form.requestSubmit(submitter || undefined);
+            } else if (submitter) {
+                submitter.click();
+            } else {
+                form.submit();
+            }
+        }
+
+        // ===== 共通 検索条件3枠ブリッジ (Arai/JU) =====
+
+        function normalizeSiteSearchBridgeMode(value) {
+            return String(value || "").trim();
+        }
+
+        function createEmptySiteSearchBridgeSlotStore() {
+            return {
+                version: MLIVE_SEARCH_BRIDGE_VERSION,
+                slots: MLIVE_SEARCH_BRIDGE_SLOT_IDS.map(id => ({ id, condition: null }))
+            };
+        }
+
+        function normalizeSiteSearchBridgeCondition(condition) {
+            if (!condition || !Array.isArray(condition.fields)) return null;
+
+            const savedAt = Number(condition.savedAt || Date.now());
+            return {
+                version: MLIVE_SEARCH_BRIDGE_VERSION,
+                sourceMode: normalizeSiteSearchBridgeMode(condition.sourceMode),
+                fields: condition.fields.filter(Boolean),
+                savedAt: Number.isFinite(savedAt) ? savedAt : Date.now(),
+                sourceUrl: condition.sourceUrl || ""
+            };
+        }
+
+        function normalizeSiteSearchBridgeSlotStore(value) {
+            const store = createEmptySiteSearchBridgeSlotStore();
+            if (!value || !Array.isArray(value.slots)) return store;
+
+            for (const slot of value.slots) {
+                const id = String(slot?.id || "");
+                const targetSlot = store.slots.find(item => item.id === id);
+                if (!targetSlot) continue;
+
+                targetSlot.condition = normalizeSiteSearchBridgeCondition(slot.condition);
+            }
+
+            return store;
+        }
+
+        async function getSiteSearchBridgeSlotStore(storageKey) {
+            const result = await chrome.storage.local.get(storageKey);
+            return normalizeSiteSearchBridgeSlotStore(result[storageKey]);
+        }
+
+        async function saveSiteSearchBridgeConditionSlot(adapter, slotId) {
+            const condition = adapter.collectCondition();
+            if (!condition) {
+                showSiteSearchBridgeNotice(adapter, "この画面では保存できる検索条件が見つかりません", "error");
+                return null;
+            }
+
+            const store = await getSiteSearchBridgeSlotStore(adapter.storageKey);
+            const slot = store.slots.find(item => item.id === String(slotId));
+            if (!slot) return null;
+
+            slot.condition = condition;
+            await chrome.storage.local.set({ [adapter.storageKey]: store });
+            return condition;
+        }
+
+        async function deleteSiteSearchBridgeConditionSlot(adapter, slotId) {
+            const store = await getSiteSearchBridgeSlotStore(adapter.storageKey);
+            const slot = store.slots.find(item => item.id === String(slotId));
+            if (!slot) return null;
+
+            slot.condition = null;
+            await chrome.storage.local.set({ [adapter.storageKey]: store });
+            return store;
+        }
+
+        async function startSiteSearchBridgeSearch(adapter, targetMode, condition = null) {
+            const savedCondition = normalizeSiteSearchBridgeCondition(condition);
+            if (!savedCondition) {
+                showSiteSearchBridgeNotice(adapter, "保存条件が空です", "error");
+                return;
+            }
+
+            const targetUrl = adapter.getTargetUrl(targetMode);
+            if (!targetUrl) {
+                showSiteSearchBridgeNotice(adapter, "移動先の検索画面が特定できません", "error");
+                return;
+            }
+
+            const pending = {
+                version: MLIVE_SEARCH_BRIDGE_VERSION,
+                targetMode,
+                condition: savedCondition,
+                createdAt: Date.now(),
+                sourceUrl: location.href
+            };
+
+            await chrome.storage.local.set({ [adapter.pendingKey]: pending });
+            location.href = targetUrl;
+        }
+
+        function createSiteSearchBridgeContainer(adapter) {
+            if (document.getElementById(adapter.uiId)) return null;
+
+            const wrap = document.createElement("div");
+            wrap.id = adapter.uiId;
+            wrap.style.position = "fixed";
+            wrap.style.zIndex = "999998";
+            wrap.style.fontFamily = "sans-serif";
+            wrap.style.fontSize = "12px";
+            Object.assign(wrap.style, adapter.position || {});
+            document.body.appendChild(wrap);
+            return wrap;
+        }
+
+        function styleSiteSearchBridgeLauncher(wrap) {
+            wrap.style.display = "block";
+            wrap.style.width = "auto";
+            wrap.style.maxHeight = "";
+            wrap.style.overflow = "visible";
+            wrap.style.padding = "0";
+            wrap.style.border = "none";
+            wrap.style.borderRadius = "0";
+            wrap.style.background = "transparent";
+            wrap.style.boxShadow = "none";
+            wrap.style.color = "#111827";
+        }
+
+        function styleSiteSearchBridgeExpandedPanel(wrap) {
+            wrap.style.display = "flex";
+            wrap.style.flexDirection = "column";
+            wrap.style.gap = "6px";
+            wrap.style.width = "min(540px, calc(100vw - 24px))";
+            wrap.style.maxHeight = "calc(100vh - 90px)";
+            wrap.style.overflow = "auto";
+            wrap.style.padding = "8px";
+            wrap.style.border = "1px solid rgba(0,0,0,0.18)";
+            wrap.style.borderRadius = "8px";
+            wrap.style.background = "rgba(255,255,255,0.98)";
+            wrap.style.boxShadow = "0 3px 14px rgba(0,0,0,0.18)";
+            wrap.style.color = "#111827";
+        }
+
+        function createSiteSearchBridgeButton(text, onClick, disabled = false) {
+            const btn = createButton(text, onClick);
+            btn.style.padding = "6px 8px";
+            btn.style.borderRadius = "6px";
+            btn.style.fontSize = "12px";
+            btn.style.marginRight = "0";
+            btn.style.boxShadow = "none";
+            btn.style.whiteSpace = "nowrap";
+
+            if (disabled) {
+                btn.disabled = true;
+                btn.style.opacity = "0.45";
+                btn.style.cursor = "default";
+            }
+
+            return btn;
+        }
+
+        function formatSiteSearchBridgeSlotStatus(adapter, condition) {
+            if (!condition) return "空";
+
+            const savedAt = Number(condition.savedAt || 0);
+            const date = new Date(Number.isFinite(savedAt) && savedAt > 0 ? savedAt : Date.now());
+            const month = String(date.getMonth() + 1).padStart(2, "0");
+            const day = String(date.getDate()).padStart(2, "0");
+            const hour = String(date.getHours()).padStart(2, "0");
+            const minute = String(date.getMinutes()).padStart(2, "0");
+            const mode = adapter.getModeLabel(condition.sourceMode) || "条件";
+
+            return `${mode} ${month}/${day} ${hour}:${minute}`;
+        }
+
+        function renderSiteSearchBridgeLauncher(wrap, adapter) {
+            wrap.textContent = "";
+            styleSiteSearchBridgeLauncher(wrap);
+
+            const btn = createSiteSearchBridgeButton("条件保存", async () => {
+                await renderSiteSearchBridgePanel(wrap, adapter);
+            });
+            btn.style.padding = "8px 10px";
+            btn.style.borderRadius = "18px";
+            btn.style.fontWeight = "700";
+            btn.style.boxShadow = "0 2px 10px rgba(0,0,0,0.18)";
+            wrap.appendChild(btn);
+        }
+
+        async function renderSiteSearchBridgePanel(wrap, adapter) {
+            styleSiteSearchBridgeExpandedPanel(wrap);
+            wrap.textContent = "保存条件を読み込み中...";
+
+            try {
+                const store = await getSiteSearchBridgeSlotStore(adapter.storageKey);
+                wrap.textContent = "";
+
+                const header = document.createElement("div");
+                header.style.display = "flex";
+                header.style.alignItems = "center";
+                header.style.justifyContent = "space-between";
+                header.style.gap = "8px";
+                header.style.marginBottom = "2px";
+
+                const title = document.createElement("div");
+                title.textContent = `${adapter.title}条件保存`;
+                title.style.fontWeight = "700";
+                header.appendChild(title);
+
+                header.appendChild(createSiteSearchBridgeButton("閉じる", async () => {
+                    renderSiteSearchBridgeLauncher(wrap, adapter);
+                }));
+
+                wrap.appendChild(header);
+
+                for (const slot of store.slots) {
+                    wrap.appendChild(createSiteSearchBridgeSlotRow(wrap, adapter, slot));
+                }
+            } catch (error) {
+                console.warn("MLive Linkifier: site bridge panel render failed", adapter.siteId, error);
+                wrap.textContent = "保存条件を読み込めませんでした";
+            }
+        }
+
+        function getSiteSearchBridgeTargetModes(adapter) {
+            const currentMode = adapter.getCurrentMode();
+            if (adapter.isSearchMode(currentMode)) {
+                return [adapter.getOppositeMode(currentMode)];
+            }
+
+            return adapter.targetModes.slice();
+        }
+
+        function createSiteSearchBridgeSlotRow(wrap, adapter, slot) {
+            const row = document.createElement("div");
+            const allowSave = adapter.canSaveCurrent();
+            const targetModes = getSiteSearchBridgeTargetModes(adapter);
+            const actionCount = targetModes.length + (allowSave ? 1 : 0) + 1;
+
+            row.style.display = "grid";
+            row.style.gridTemplateColumns = `54px minmax(96px, 1fr) repeat(${actionCount}, auto)`;
+            row.style.alignItems = "center";
+            row.style.gap = "6px";
+            row.style.padding = "6px";
+            row.style.border = "1px solid rgba(0,0,0,0.1)";
+            row.style.borderRadius = "6px";
+            row.style.background = "#f9fafb";
+
+            const label = document.createElement("div");
+            label.textContent = `保存${slot.id}`;
+            label.style.fontWeight = "700";
+            row.appendChild(label);
+
+            const status = document.createElement("div");
+            status.textContent = formatSiteSearchBridgeSlotStatus(adapter, slot.condition);
+            status.title = slot.condition?.sourceUrl || "";
+            status.style.overflow = "hidden";
+            status.style.textOverflow = "ellipsis";
+            status.style.whiteSpace = "nowrap";
+            row.appendChild(status);
+
+            if (allowSave) {
+                row.appendChild(createSiteSearchBridgeButton("この条件を保存", async () => {
+                    const condition = await saveSiteSearchBridgeConditionSlot(adapter, slot.id);
+                    if (condition) showSiteSearchBridgeNotice(adapter, `保存${slot.id}に保存しました`);
+                    await renderSiteSearchBridgePanel(wrap, adapter);
+                }));
+            }
+
+            for (const targetMode of targetModes) {
+                row.appendChild(createSiteSearchBridgeButton(`${adapter.getModeLabel(targetMode)}へ`, async () => {
+                    await startSiteSearchBridgeSearch(adapter, targetMode, slot.condition);
+                }, !slot.condition));
+            }
+
+            row.appendChild(createSiteSearchBridgeButton("削除", async () => {
+                if (!confirm(`保存${slot.id}を削除しますか？`)) return;
+
+                await deleteSiteSearchBridgeConditionSlot(adapter, slot.id);
+                showSiteSearchBridgeNotice(adapter, `保存${slot.id}を削除しました`);
+                await renderSiteSearchBridgePanel(wrap, adapter);
+            }, !slot.condition));
+
+            return row;
+        }
+
+        function showSiteSearchBridgeNotice(adapter, message, type = "info") {
+            const id = `${adapter.siteId}-search-bridge-notice`;
+            const old = document.getElementById(id);
+            if (old) old.remove();
+
+            const notice = document.createElement("div");
+            notice.id = id;
+            notice.textContent = message;
+            notice.style.position = "fixed";
+            notice.style.right = "16px";
+            notice.style.bottom = "16px";
+            notice.style.zIndex = "1000000";
+            notice.style.maxWidth = "min(420px, calc(100vw - 32px))";
+            notice.style.padding = "10px 12px";
+            notice.style.borderRadius = "8px";
+            notice.style.boxShadow = "0 4px 18px rgba(0,0,0,0.25)";
+            notice.style.fontSize = "13px";
+            notice.style.lineHeight = "1.4";
+            notice.style.fontFamily = "sans-serif";
+            notice.style.color = "white";
+            notice.style.background = type === "error" ? "#b91c1c" : "#1f2937";
+            document.body.appendChild(notice);
+
+            setTimeout(() => notice.remove(), 4500);
+        }
+
+        function installSiteSearchBridge(adapter) {
+            if (!document.body || !adapter.shouldInstall()) return;
+            if (document.getElementById(adapter.uiId)) return;
+
+            const wrap = createSiteSearchBridgeContainer(adapter);
+            if (!wrap) return;
+
+            renderSiteSearchBridgeLauncher(wrap, adapter);
+        }
+
+        async function applySiteSearchBridgePending(adapter) {
+            if (adapter.state.pendingRunning || adapter.state.pendingApplied) return;
+
+            const currentMode = adapter.getCurrentMode();
+            if (!adapter.isSearchMode(currentMode) || !adapter.isRestoreReady()) return;
+
+            adapter.state.pendingRunning = true;
+            try {
+                const result = await chrome.storage.local.get(adapter.pendingKey);
+                const pending = result[adapter.pendingKey];
+                if (!pending) return;
+
+                if (pending.version !== MLIVE_SEARCH_BRIDGE_VERSION || !pending.condition) {
+                    await chrome.storage.local.remove(adapter.pendingKey);
+                    return;
+                }
+
+                if (Date.now() - Number(pending.createdAt || 0) > 10 * 60 * 1000) {
+                    await chrome.storage.local.remove(adapter.pendingKey);
+                    return;
+                }
+
+                if (normalizeSiteSearchBridgeMode(pending.targetMode) !== currentMode) return;
+
+                const condition = normalizeSiteSearchBridgeCondition(pending.condition);
+                if (!condition) {
+                    await chrome.storage.local.remove(adapter.pendingKey);
+                    return;
+                }
+
+                adapter.restoreCondition(condition, currentMode);
+                adapter.state.pendingApplied = true;
+                await chrome.storage.local.remove(adapter.pendingKey);
+
+                showSiteSearchBridgeNotice(adapter, `保存条件で${adapter.getModeLabel(currentMode)}検索します`);
+                setTimeout(() => adapter.submitSearch(), 160);
+            } catch (error) {
+                console.warn("MLive Linkifier: site bridge pending search failed", adapter.siteId, error);
+                showSiteSearchBridgeNotice(adapter, "保存条件の検索に失敗しました", "error");
+            } finally {
+                adapter.state.pendingRunning = false;
+            }
+        }
+
+        function isSearchBridgeSavableControl(el) {
+            if (!el || el.disabled) return false;
+            if (!el.id && !el.name) return false;
+
+            const type = String(el.type || "").toLowerCase();
+            if (/^(button|submit|reset|file|image|password|hidden)$/i.test(type)) return false;
+
+            const marker = `${el.id || ""} ${el.name || ""}`.toLowerCase();
+            if (/(requestverificationtoken|csrf|token|password)/i.test(marker)) return false;
+
+            return /^(INPUT|SELECT|TEXTAREA)$/i.test(el.tagName);
+        }
+
+        function createSearchBridgeFieldRecord(el, extra = {}) {
+            if (!isSearchBridgeSavableControl(el)) return null;
+
+            const type = String(el.type || "").toLowerCase();
+            const record = {
+                id: el.id || "",
+                name: el.name || "",
+                tag: String(el.tagName || "").toLowerCase(),
+                type,
+                value: "value" in el ? String(el.value ?? "") : "",
+                ...extra
+            };
+
+            if (type === "checkbox" || type === "radio") {
+                record.checked = !!el.checked;
+                record.value = String(el.value ?? "");
+            } else if (el.tagName === "SELECT" && el.multiple) {
+                record.selectedValues = Array.from(el.selectedOptions).map(option => String(option.value ?? ""));
+            }
+
+            return record;
+        }
+
+        function applySearchBridgeFieldRecord(el, record) {
+            if (!el || !record) return;
+
+            const type = String(el.type || "").toLowerCase();
+            if (type === "checkbox" || type === "radio") {
+                el.checked = !!record.checked;
+            } else if (el.tagName === "SELECT" && el.multiple && Array.isArray(record.selectedValues)) {
+                const selected = new Set(record.selectedValues.map(value => String(value ?? "")));
+                Array.from(el.options).forEach(option => {
+                    option.selected = selected.has(String(option.value ?? ""));
+                });
+            } else if ("value" in el) {
+                el.value = String(record.value ?? "");
+            }
+
+            dispatchSearchBridgeFieldEvents(el);
+        }
+
+        function dispatchSearchBridgeFieldEvents(el) {
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+
+        function findSearchBridgeControlByName(record) {
+            if (!record.name) return null;
+
+            const candidates = Array.from(document.querySelectorAll("input,select,textarea"))
+                .filter(el => el.name === record.name);
+
+            if (record.type === "checkbox" || record.type === "radio") {
+                return candidates.find(el => String(el.value ?? "") === String(record.value ?? "")) || null;
+            }
+
+            return candidates[0] || null;
+        }
+
+        function normalizeSearchBridgeText(value) {
+            return String(value || "").replace(/\s+/g, " ").trim();
+        }
+
+        function findSearchBridgeButtonByText(text, root = document) {
+            const expected = normalizeSearchBridgeText(text);
+            const candidates = Array.from(root.querySelectorAll("button,input[type='button'],input[type='submit'],a"));
+
+            return candidates.find(el => {
+                const actual = normalizeSearchBridgeText(el.textContent || el.value || el.getAttribute("aria-label"));
+                return actual === expected;
+            }) || null;
+        }
+
+        // ===== Arai 検索条件ブリッジ =====
+
+        function getAraiSearchBridgeMode() {
+            const path = location.pathname.toLowerCase();
+            const search = location.search.toLowerCase();
+
+            if (path.endsWith("/01_search.html")) return "listing";
+            if (path.endsWith("/04_information.html") && /(?:^\?|[?&])id=0(?:[=&]|$)/.test(search)) return "market";
+
+            return "";
+        }
+
+        function getAraiSearchBridgeModeLabel(mode) {
+            if (mode === "market") return "相場";
+            if (mode === "listing") return "出品";
+            return "条件";
+        }
+
+        function getAraiOppositeSearchBridgeMode(mode) {
+            return mode === "market" ? "listing" : "market";
+        }
+
+        function isAraiSearchBridgeMode(mode) {
+            return mode === "listing" || mode === "market";
+        }
+
+        function shouldInstallAraiSearchBridge() {
+            const mode = getAraiSearchBridgeMode();
+            if (isAraiSearchBridgeMode(mode)) return true;
+
+            const path = location.pathname.toLowerCase();
+            if (path.includes("/00_")) return false;
+
+            return path.includes("/01_") ||
+                path.includes("/04_") ||
+                !!document.querySelector("#spList,#mainGazou,ul#gazou");
+        }
+
+        function collectAraiSearchBridgeCondition() {
+            const sourceMode = getAraiSearchBridgeMode();
+            if (!isAraiSearchBridgeMode(sourceMode)) return null;
+
+            const fields = Array.from(document.querySelectorAll("input,select,textarea"))
+                .map(el => createSearchBridgeFieldRecord(el))
+                .filter(Boolean);
+
+            if (fields.length === 0) return null;
+
+            return {
+                version: MLIVE_SEARCH_BRIDGE_VERSION,
+                sourceMode,
+                fields,
+                savedAt: Date.now(),
+                sourceUrl: location.href
+            };
+        }
+
+        function findAraiSearchBridgeControl(record) {
+            if (record.id) {
+                const byId = document.getElementById(record.id);
+                if (byId) return byId;
+            }
+
+            return findSearchBridgeControlByName(record);
+        }
+
+        function restoreAraiSearchBridgeCondition(condition) {
+            for (const record of condition.fields || []) {
+                const target = findAraiSearchBridgeControl(record);
+                if (!target) continue;
+
+                applySearchBridgeFieldRecord(target, record);
+            }
+        }
+
+        function getAraiSearchBridgeTargetUrl(mode) {
+            if (mode === "listing") return new URL("/01_search.html", location.origin).toString();
+            if (mode === "market") return new URL("/04_information.html?id=0=", location.origin).toString();
+            return "";
+        }
+
+        function submitAraiSearchBridge() {
+            const button = document.getElementById("btKaijo_exe") || findSearchBridgeButtonByText("次へ");
+            if (button) {
+                button.click();
+                return;
+            }
+
+            showSiteSearchBridgeNotice(getAraiSearchBridgeAdapter(), "検索ボタンが見つかりません", "error");
+        }
+
+        function getAraiSearchBridgeAdapter() {
+            return {
+                siteId: "arai",
+                title: "Arai",
+                storageKey: ARAI_SEARCH_BRIDGE_SLOTS_KEY,
+                pendingKey: ARAI_SEARCH_BRIDGE_PENDING_KEY,
+                uiId: "arai-search-bridge-ui",
+                position: { right: "12px", bottom: "78px" },
+                state: siteSearchBridgeState.arai,
+                targetModes: ["listing", "market"],
+                shouldInstall: shouldInstallAraiSearchBridge,
+                getCurrentMode: getAraiSearchBridgeMode,
+                getModeLabel: getAraiSearchBridgeModeLabel,
+                getOppositeMode: getAraiOppositeSearchBridgeMode,
+                isSearchMode: isAraiSearchBridgeMode,
+                canSaveCurrent: () => isAraiSearchBridgeMode(getAraiSearchBridgeMode()) && document.querySelectorAll("input,select,textarea").length > 0,
+                collectCondition: collectAraiSearchBridgeCondition,
+                restoreCondition: restoreAraiSearchBridgeCondition,
+                getTargetUrl: getAraiSearchBridgeTargetUrl,
+                isRestoreReady: () => isAraiSearchBridgeMode(getAraiSearchBridgeMode()) && !!document.getElementById("btKaijo_exe"),
+                submitSearch: submitAraiSearchBridge
+            };
+        }
+
+        function processAraiSearchBridge() {
+            const adapter = getAraiSearchBridgeAdapter();
+            installSiteSearchBridge(adapter);
+            applySiteSearchBridgePending(adapter);
+        }
+
+        // ===== JU 検索条件ブリッジ =====
+
+        function getJuSearchBridgeMode() {
+            const path = location.pathname.toLowerCase();
+            if (path.endsWith("/junaviweb/carsearch")) return "listing";
+            if (path.endsWith("/junaviweb/marketpricesearch")) return "market";
+
+            return "";
+        }
+
+        function getJuSearchBridgeModeLabel(mode) {
+            if (mode === "market") return "相場";
+            if (mode === "listing") return "出品";
+            return "条件";
+        }
+
+        function getJuOppositeSearchBridgeMode(mode) {
+            return mode === "market" ? "listing" : "market";
+        }
+
+        function isJuSearchBridgeMode(mode) {
+            return mode === "listing" || mode === "market";
+        }
+
+        function getJuSearchBridgeForm() {
+            return document.querySelector("#b5-Form") || document.querySelector("#b3-Form");
+        }
+
+        function shouldInstallJuSearchBridge() {
+            const mode = getJuSearchBridgeMode();
+            if (isJuSearchBridgeMode(mode)) return true;
+
+            const path = location.pathname.toLowerCase();
+            return path.includes("/junaviweb/") &&
+                !path.endsWith("/junaviweb/top") &&
+                /(search|marketprice|detail|list)/i.test(path);
+        }
+
+        function getJuSearchBridgeFieldKey(el) {
+            const id = el.id || "";
+            const match = id.match(/^b\d+-(.+)$/);
+            if (match) return match[1];
+
+            return id || el.name || "";
+        }
+
+        function collectJuSearchBridgeCondition() {
+            const sourceMode = getJuSearchBridgeMode();
+            const form = getJuSearchBridgeForm();
+            if (!isJuSearchBridgeMode(sourceMode) || !form) return null;
+
+            const fields = Array.from(form.querySelectorAll("input,select,textarea"))
+                .map(el => {
+                    const key = getJuSearchBridgeFieldKey(el);
+                    if (!key) return null;
+
+                    return createSearchBridgeFieldRecord(el, { key });
+                })
+                .filter(Boolean);
+
+            if (fields.length === 0) return null;
+
+            return {
+                version: MLIVE_SEARCH_BRIDGE_VERSION,
+                sourceMode,
+                fields,
+                savedAt: Date.now(),
+                sourceUrl: location.href
+            };
+        }
+
+        function getJuSearchBridgeTargetPrefix(mode) {
+            return mode === "market" ? "b3-" : "b5-";
+        }
+
+        function restoreJuSearchBridgeCondition(condition, targetMode) {
+            const prefix = getJuSearchBridgeTargetPrefix(targetMode);
+
+            for (const record of condition.fields || []) {
+                const key = record.key || getJuSearchBridgeFieldKey(record);
+                if (!key) continue;
+
+                const target = document.getElementById(`${prefix}${key}`);
+                if (!target) continue;
+
+                applySearchBridgeFieldRecord(target, record);
+            }
+        }
+
+        function getJuSearchBridgeTargetUrl(mode) {
+            if (mode === "listing") return new URL("/JUNaviWEB/CarSearch", location.origin).toString();
+            if (mode === "market") return new URL("/JUNaviWEB/MarketPriceSearch", location.origin).toString();
+            return "";
+        }
+
+        function submitJuSearchBridge() {
+            const form = getJuSearchBridgeForm();
+            const button = findSearchBridgeButtonByText("この条件で検索", form || document);
+
+            if (button) {
+                button.click();
+                return;
+            }
+
+            if (form && typeof form.requestSubmit === "function") {
+                form.requestSubmit();
+                return;
+            }
+
+            showSiteSearchBridgeNotice(getJuSearchBridgeAdapter(), "検索ボタンが見つかりません", "error");
+        }
+
+        function getJuSearchBridgeAdapter() {
+            return {
+                siteId: "ju",
+                title: "JU",
+                storageKey: JU_SEARCH_BRIDGE_SLOTS_KEY,
+                pendingKey: JU_SEARCH_BRIDGE_PENDING_KEY,
+                uiId: "ju-search-bridge-ui",
+                position: { right: "12px", bottom: "112px" },
+                state: siteSearchBridgeState.ju,
+                targetModes: ["listing", "market"],
+                shouldInstall: shouldInstallJuSearchBridge,
+                getCurrentMode: getJuSearchBridgeMode,
+                getModeLabel: getJuSearchBridgeModeLabel,
+                getOppositeMode: getJuOppositeSearchBridgeMode,
+                isSearchMode: isJuSearchBridgeMode,
+                canSaveCurrent: () => isJuSearchBridgeMode(getJuSearchBridgeMode()) && !!getJuSearchBridgeForm(),
+                collectCondition: collectJuSearchBridgeCondition,
+                restoreCondition: restoreJuSearchBridgeCondition,
+                getTargetUrl: getJuSearchBridgeTargetUrl,
+                isRestoreReady: () => isJuSearchBridgeMode(getJuSearchBridgeMode()) && !!getJuSearchBridgeForm(),
+                submitSearch: submitJuSearchBridge
+            };
+        }
+
+        function processJuSearchBridge() {
+            const adapter = getJuSearchBridgeAdapter();
+            installSiteSearchBridge(adapter);
+            applySiteSearchBridgePending(adapter);
         }
 
         // MLive用 自動選択ロジック
@@ -372,6 +1933,7 @@
         // ===== サイト別実装: Arai AA =====
 
         function processAraiAA() {
+            processAraiSearchBridge();
             // window.open override is handled in the entry point at document_start
 
 
@@ -381,6 +1943,16 @@
 
             // 画像URL収集
             function collect() {
+                function toImageUrl(value) {
+                    if (!value || !/\.(?:jpe?g|png|webp|gif|bmp)(?:[?#]|$)/i.test(value)) return null;
+
+                    try {
+                        return new URL(value, location.href).toString();
+                    } catch {
+                        return null;
+                    }
+                }
+
                 // パターン1: 詳細ページの「拡大画像」リンクから一括取得 (最も高画質・確実)
                 // <div class="zoom_area" id="mainGazou"><a href="./form_...html?0=URL1=URL2=...">
                 const zoomLink = document.querySelector("#mainGazou a");
@@ -394,10 +1966,7 @@
                             const candidates = query.split("=");
                             // URLっぽいものだけ抽出
                             const urls = candidates
-                                .filter(s => s.startsWith("http"))
-                                .map(u => {
-                                    try { return new URL(u, location.href).toString(); } catch { return null; }
-                                })
+                                .map(toImageUrl)
                                 .filter(Boolean);
 
                             if (urls.length > 0) return Array.from(new Set(urls));
@@ -406,16 +1975,12 @@
                 }
 
                 // パターン2: 詳細ページのサムネイルリスト (ul#gazou)
-                const detailImgs = Array.from(document.querySelectorAll("ul#gazou img"));
+                const detailImgs = Array.from(document.querySelectorAll("ul#gazou img:not(.img_4k)"));
                 if (detailImgs.length > 0) {
                     const urls = detailImgs
                         .map(img => img.src) // srcをそのまま使う (クエリ付きでもOK、保存時にファイル名生成で除去されるはず)
                         .filter(Boolean)
-                        .map(u => {
-                            // クエリパラメータ(?0.123...)が付いていることが多いので、念のためそのまま渡すが、
-                            // 重復除外のためにURLオブジェクト化
-                            try { return new URL(u, location.href).toString(); } catch { return null; }
-                        })
+                        .map(toImageUrl)
                         .filter(Boolean);
                     return Array.from(new Set(urls));
                 }
@@ -427,9 +1992,7 @@
                     const urls = listImgs
                         .map(img => img.getAttribute("data-large"))
                         .filter(Boolean)
-                        .map(u => {
-                            try { return new URL(u, location.href).toString(); } catch { return null; }
-                        })
+                        .map(toImageUrl)
                         .filter(Boolean);
                     return Array.from(new Set(urls));
                 }
@@ -437,8 +2000,139 @@
                 return [];
             }
 
-            const initialUrls = collect();
-            if (initialUrls.length === 0) return;
+            function isAraiSheetImageUrl(url) {
+                try {
+                    return /\/OH\//i.test(new URL(url, location.href).pathname);
+                } catch {
+                    return false;
+                }
+            }
+
+            function collectAraiImageSets() {
+                const allUrls = collect();
+                const sheetUrl = allUrls.find(isAraiSheetImageUrl) || "";
+                const vehicleUrls = sheetUrl ? allUrls.filter(url => url !== sheetUrl) : allUrls;
+
+                return { allUrls, vehicleUrls, sheetUrl };
+            }
+
+            function normalizeAraiText(value) {
+                return (value || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+            }
+
+            function textFromSelector(selector) {
+                const el = document.querySelector(selector);
+                if (!el) return "";
+
+                if ("value" in el && el.value) {
+                    return normalizeAraiText(el.value);
+                }
+
+                return normalizeAraiText(el.textContent || el.getAttribute("title") || el.getAttribute("alt"));
+            }
+
+            function cleanAraiInfoValue(value) {
+                return normalizeAraiText(value)
+                    .replace(/^[：:\-=]+/, "")
+                    .replace(/[：:\-=]+$/, "")
+                    .trim();
+            }
+
+            function escapeRegex(value) {
+                return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            }
+
+            function findAraiValueByLabels(labels) {
+                const labelPattern = new RegExp(labels.map(escapeRegex).join("|"), "i");
+
+                for (const dl of Array.from(document.querySelectorAll("dl"))) {
+                    const label = normalizeAraiText(dl.querySelector("dt")?.textContent);
+                    const value = normalizeAraiText(dl.querySelector("dd")?.textContent);
+                    if (label && value && labelPattern.test(label)) return value;
+                }
+
+                for (const row of Array.from(document.querySelectorAll("tr"))) {
+                    const cells = Array.from(row.children).filter(el => /^(TH|TD)$/i.test(el.tagName));
+                    if (cells.length < 2) continue;
+
+                    const label = normalizeAraiText(cells[0].textContent);
+                    const value = normalizeAraiText(cells.slice(1).map(el => el.textContent).join(" "));
+                    if (label && value && labelPattern.test(label)) return value;
+                }
+
+                const lines = (document.body?.innerText || "")
+                    .replace(/\u00a0/g, " ")
+                    .split(/[\r\n]+/)
+                    .map(line => normalizeAraiText(line))
+                    .filter(Boolean);
+
+                for (let i = 0; i < lines.length; i++) {
+                    const line = lines[i];
+                    const match = labels.find(label => line.includes(label));
+                    if (!match) continue;
+
+                    const afterLabel = cleanAraiInfoValue(line.slice(line.indexOf(match) + match.length));
+                    if (afterLabel) return afterLabel;
+
+                    const nextLine = lines[i + 1];
+                    if (nextLine && !labels.some(label => nextLine.includes(label))) return nextLine;
+                }
+
+                return "";
+            }
+
+            function getAraiSaveMeta() {
+                const auctionNo = cleanAraiInfoValue(
+                    textFromSelector("#sno") ||
+                    textFromSelector("#sp02") ||
+                    findAraiValueByLabels(["出品番号", "出品No", "出品NO", "出品Ｎｏ", "出品ＮＯ", "EntryNo.", "Entry No", "SNO"])
+                );
+                const carName = cleanAraiInfoValue(
+                    textFromSelector("#syamei") ||
+                    findAraiValueByLabels(["車名", "車種", "車両名", "Name", "Vehicle"])
+                );
+                const saveBase = sanitizeDownloadName([auctionNo, carName].filter(Boolean).join("_"), "araiaa_unknown");
+
+                if (!auctionNo || !carName) {
+                    console.warn("MLive Linkifier: Arai save name is missing a field", { auctionNo, carName, saveBase });
+                }
+
+                return {
+                    filenameBase: saveBase,
+                    folderCode: `araiaa/${saveBase}`
+                };
+            }
+
+            function imageExtensionFromUrl(url) {
+                const base = filenameFromUrl(url, "image.jpg", true);
+                const match = base.match(/\.(jpe?g|png|webp|gif|bmp)$/i);
+                if (!match) return ".jpg";
+
+                return `.${match[1].toLowerCase().replace("jpeg", "jpg")}`;
+            }
+
+            async function downloadAraiImages(urls, saveMeta) {
+                for (let i = 0; i < urls.length; i++) {
+                    const num = String(i + 1).padStart(2, "0");
+                    const extension = imageExtensionFromUrl(urls[i]);
+                    await downloadOne(urls[i], saveMeta.folderCode, `${saveMeta.filenameBase}_${num}${extension}`);
+                    await new Promise(r => setTimeout(r, 250));
+                }
+            }
+
+            async function downloadAraiFullSet(imageSets, saveMeta) {
+                if (imageSets.sheetUrl) {
+                    await downloadOne(imageSets.sheetUrl, saveMeta.folderCode, `${saveMeta.filenameBase}_出品票.jpg`);
+                    await new Promise(r => setTimeout(r, 250));
+                }
+
+                if (imageSets.vehicleUrls.length > 0) {
+                    await downloadAraiImages(imageSets.vehicleUrls, saveMeta);
+                }
+            }
+
+            const initialImages = collectAraiImageSets();
+            if (initialImages.allUrls.length === 0) return;
 
             const wrap = createFloatingContainer(boxId);
             if (!wrap) return;
@@ -446,26 +2140,33 @@
             // 全画像保存
             // ①枚目保存
             wrap.appendChild(createButton("出品票保存", async () => {
-                const current = collect();
-                if (current.length === 0) return;
-                await downloadOne(current[current.length - 1], "araiaa");
+                const current = collectAraiImageSets();
+                if (!current.sheetUrl) {
+                    console.warn("MLive Linkifier: Arai sheet image was not found");
+                    return;
+                }
+
+                const saveMeta = getAraiSaveMeta();
+                await downloadOne(current.sheetUrl, saveMeta.folderCode, `${saveMeta.filenameBase}_出品票.jpg`);
             }));
 
             // 数枚保存 (最初から6枚 + 最後の画像)
-            wrap.appendChild(createButton("Pickup(7枚)", async () => {
-                const current = collect();
-                if (current.length === 0) return;
+            wrap.appendChild(createButton("Pickup(車6+票)", async () => {
+                const current = collectAraiImageSets();
+                if (current.vehicleUrls.length === 0 && !current.sheetUrl) return;
 
-                const indices = new Set([0, 1, 2, 3, 4, 5, current.length - 1]);
-                const targetUrls = current.filter((_, i) => indices.has(i));
+                const saveMeta = getAraiSaveMeta();
+                await downloadAraiImages(current.vehicleUrls.slice(0, 6), saveMeta);
 
-                await downloadAll(targetUrls, "araiaa");
+                if (current.sheetUrl) {
+                    await downloadOne(current.sheetUrl, saveMeta.folderCode, `${saveMeta.filenameBase}_出品票.jpg`);
+                }
             }));
 
-            wrap.appendChild(createButton(`全画像保存(${initialUrls.length})`, async () => {
-                const current = collect();
-                if (current.length === 0) return;
-                await downloadAll(current, "araiaa");
+            wrap.appendChild(createButton(`全保存(票+車${initialImages.vehicleUrls.length})`, async () => {
+                const current = collectAraiImageSets();
+                if (current.vehicleUrls.length === 0 && !current.sheetUrl) return;
+                await downloadAraiFullSet(current, getAraiSaveMeta());
             }));
         }
 
@@ -484,6 +2185,7 @@
             }
 
             processJuNaviGlobal();
+            processJuSearchBridge();
             processJuNaviDetail();
             processJuNaviListAutomation();
         }
@@ -640,6 +2342,58 @@
                     return Array.from(new Set(urls));
                 }
 
+                function collectJuNaviImageSets() {
+                    const allUrls = collect();
+                    return {
+                        allUrls,
+                        sheetUrl: allUrls[0] || "",
+                        vehicleUrls: allUrls.slice(1)
+                    };
+                }
+
+                function normalizeJuNaviText(value) {
+                    return (value || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+                }
+
+                function findJuNaviValueByLabels(labels) {
+                    const lines = (root.innerText || "")
+                        .replace(/\u00a0/g, " ")
+                        .split(/[\r\n]+/)
+                        .map(line => normalizeJuNaviText(line))
+                        .filter(Boolean);
+
+                    for (let i = 0; i < lines.length; i++) {
+                        const line = lines[i];
+                        const label = labels.find(item => line.includes(item));
+                        if (!label) continue;
+
+                        const afterLabel = normalizeJuNaviText(line.slice(line.indexOf(label) + label.length));
+                        if (afterLabel) return afterLabel;
+
+                        const nextLine = lines[i + 1];
+                        if (nextLine && !labels.some(item => nextLine.includes(item))) return nextLine;
+                    }
+
+                    return "";
+                }
+
+                function cleanJuNaviAuctionNo(value) {
+                    const text = normalizeJuNaviText(value).replace(/\s*号車$/, "");
+                    const match = text.match(/[A-Z]?\d{2,}(?:-\d+)?/i);
+                    return match ? match[0] : text;
+                }
+
+                function getJuNaviAuctionNo() {
+                    const direct = normalizeJuNaviText(root.querySelector(".junaviweb-detail-shuppinno span")?.textContent);
+                    if (direct) return cleanJuNaviAuctionNo(direct);
+
+                    const params = new URL(location.href).searchParams;
+                    const paramValue = params.get("seriNo") || params.get("sno") || params.get("aucNo") || params.get("auctionNo") || params.get("exhibitNo") || "";
+                    const labelValue = findJuNaviValueByLabels(["出品番号", "出品No", "出品NO", "出品Ｎｏ", "出品ＮＯ", "号車"]);
+
+                    return cleanJuNaviAuctionNo(labelValue || paramValue);
+                }
+
                 // 車名取得 (このスクリーン内限定)
                 function getCarName() {
                     let el = root.querySelector(".junaviweb-detail-car-list-row-carname-grede-text");
@@ -647,11 +2401,27 @@
                         el = root.querySelector(".junaviweb-detail-carname-grade");
                     }
                     if (!el) return "unknown";
-                    return el.textContent.trim().replace(/[\\/:*?"<>|]/g, "_");
+                    return normalizeJuNaviText(el.textContent);
                 }
 
-                const initialUrls = collect();
-                if (initialUrls.length === 0) return;
+                function getJuNaviSaveMeta() {
+                    const auctionNo = getJuNaviAuctionNo();
+                    const carName = getCarName();
+                    const parts = [auctionNo, carName].filter(value => value && value !== "unknown");
+                    const filenameBase = sanitizeDownloadName(parts.join("_"), "junavi_unknown");
+
+                    if (!auctionNo || !carName || carName === "unknown") {
+                        console.warn("MLive Linkifier: JU Navi save name is missing a field", { auctionNo, carName, filenameBase });
+                    }
+
+                    return {
+                        filenameBase,
+                        folderPath: `junavi/${filenameBase}`
+                    };
+                }
+
+                const initialImages = collectJuNaviImageSets();
+                if (initialImages.allUrls.length === 0) return;
 
                 // コンテナ作成 (IDではなくクラスで管理)
                 const wrap = document.createElement("div");
@@ -686,39 +2456,59 @@
                     }
                 }
 
+                async function downloadJuNaviBlob(blobUrl, saveMeta, filename) {
+                    const dataUrl = await blobToDataUrl(blobUrl);
+                    if (dataUrl) {
+                        await downloadOne(dataUrl, saveMeta.folderPath, filename);
+                    }
+                }
+
+                async function downloadJuNaviImages(blobUrls, saveMeta) {
+                    for (let i = 0; i < blobUrls.length; i++) {
+                        const num = String(i + 1).padStart(2, "0");
+                        await downloadJuNaviBlob(blobUrls[i], saveMeta, `${saveMeta.filenameBase}_${num}.jpg`);
+                        await new Promise(r => setTimeout(r, 250));
+                    }
+                }
+
+                async function downloadJuNaviFullSet(imageSets, saveMeta) {
+                    if (imageSets.sheetUrl) {
+                        await downloadJuNaviBlob(imageSets.sheetUrl, saveMeta, `${saveMeta.filenameBase}_出品票.jpg`);
+                        await new Promise(r => setTimeout(r, 250));
+                    }
+
+                    if (imageSets.vehicleUrls.length > 0) {
+                        await downloadJuNaviImages(imageSets.vehicleUrls, saveMeta);
+                    }
+                }
+
                 // ボタン: 出品票保存
                 wrap.appendChild(createButton("出品票保存", async () => {
-                    const current = collect();
-                    if (current.length === 0) return;
+                    const current = collectJuNaviImageSets();
+                    if (!current.sheetUrl) return;
 
-                    const carName = getCarName();
-                    const folderPath = `junavi/${carName}`;
+                    const saveMeta = getJuNaviSaveMeta();
+                    await downloadJuNaviBlob(current.sheetUrl, saveMeta, `${saveMeta.filenameBase}_出品票.jpg`);
+                }));
 
-                    const targetBlobUrl = current[0];
-                    const dataUrl = await blobToDataUrl(targetBlobUrl);
-                    if (dataUrl) {
-                        await downloadOne(dataUrl, folderPath, `${carName}_出品票.jpg`);
+                wrap.appendChild(createButton("Pickup(車6+票)", async () => {
+                    const current = collectJuNaviImageSets();
+                    if (current.vehicleUrls.length === 0 && !current.sheetUrl) return;
+
+                    const saveMeta = getJuNaviSaveMeta();
+                    await downloadJuNaviImages(current.vehicleUrls.slice(0, 6), saveMeta);
+
+                    if (current.sheetUrl) {
+                        await downloadJuNaviBlob(current.sheetUrl, saveMeta, `${saveMeta.filenameBase}_出品票.jpg`);
                     }
                 }));
 
-                // ボタン: 全画像保存
-                wrap.appendChild(createButton(`全画像保存(${initialUrls.length})`, async () => {
-                    const current = collect();
-                    if (current.length === 0) return;
+                // ボタン: 全保存
+                wrap.appendChild(createButton(`全保存(票+車${initialImages.vehicleUrls.length})`, async () => {
+                    const current = collectJuNaviImageSets();
+                    if (current.vehicleUrls.length === 0 && !current.sheetUrl) return;
 
-                    const carName = getCarName();
-                    const folderPath = `junavi/${carName}`;
-
-                    for (let i = 0; i < current.length; i++) {
-                        const blobUrl = current[i];
-                        const dataUrl = await blobToDataUrl(blobUrl);
-                        if (dataUrl) {
-                            const num = String(i + 1).padStart(2, "0");
-                            const name = `${carName}_${num}.jpg`;
-                            await downloadOne(dataUrl, folderPath, name);
-                        }
-                        await new Promise(r => setTimeout(r, 200));
-                    }
+                    await downloadJuNaviFullSet(current, getJuNaviSaveMeta());
                 }));
             });
         }
