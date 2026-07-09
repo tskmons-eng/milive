@@ -44,8 +44,12 @@
                 buttonId: button?.id || "",
                 buttonText: (button?.textContent || button?.value || "").replace(/\s+/g, " ").trim().slice(0, 80),
                 buttonVisible: isVisible(button),
-                hasConditionButton: !!document.getElementById("btAppointed"),
+                hasConditionButton: !!(document.getElementById("btAppointed") || document.getElementById("btSearch")),
+                hasBtAppointed: !!document.getElementById("btAppointed"),
+                hasBtSearch: !!document.getElementById("btSearch"),
+                hasMarketNameTab: !!document.getElementById("johoTab1"),
                 hasMarketConditionTab: !!document.getElementById("johoTab3"),
+                hasListingNameTab: !!document.getElementById("tbSearchTab1"),
                 hasListingConditionTab: !!document.getElementById("tbSearchTab5"),
                 hasJquery: typeof window.jQuery === "function",
                 toggleCarClass: document.getElementById("toggle_car")?.className || "",
@@ -246,7 +250,7 @@
             }
         };
 
-        const runAraiNextAttempts = () => {
+        const runAraiNextAttempts = (searchKind = "condition") => {
             const attempts = [];
             const hasConditionForm = (_before, after) => !!after.hasConditionButton;
             const tryAttempt = (label, fn) => {
@@ -256,21 +260,21 @@
             };
 
             if (tryAttempt("jquery-trigger(btKaijo_exe)", () => {
-                activateAraiConditionMode();
+                activateAraiSearchMode(searchKind);
                 setAraiFourWheelDomSelection();
                 const result = triggerAraiElementClick("btKaijo_exe");
                 if (!result.ok) throw new Error(result.error);
             })) return { ok: true, method: attempts.at(-1).label, attempts };
 
             if (tryAttempt("cmKaijoSelector.onclick(btKaijo_exe)", () => {
-                activateAraiConditionMode();
+                activateAraiSearchMode(searchKind);
                 setAraiFourWheelDomSelection();
                 if (typeof window.cmKaijoSelector?.onclick !== "function") throw new Error("cmKaijoSelector.onclick is not ready");
                 window.cmKaijoSelector.onclick("btKaijo_exe");
             })) return { ok: true, method: attempts.at(-1).label, attempts };
 
             if (tryAttempt("activateMode+doKaijoSend", () => {
-                activateAraiConditionMode();
+                activateAraiSearchMode(searchKind);
                 setAraiFourWheelDomSelection();
                 if (typeof window.cmKaijoSelector?.doKaijoSend !== "function") throw new Error("cmKaijoSelector.doKaijoSend is not ready");
                 window.cmKaijoSelector.doKaijoSend();
@@ -281,11 +285,23 @@
                 window.cmKaijoSelector.doQuerySelsct();
             })) return { ok: true, method: attempts.at(-1).label, attempts };
 
-            if (tryAttempt("force-condition-render", () => {
+            if (searchKind !== "name" && tryAttempt("force-condition-render", () => {
                 forceAraiConditionRender();
             })) return { ok: true, method: attempts.at(-1).label, attempts };
 
             return { ok: false, method: "", attempts };
+        };
+
+        const runAraiFreewordSearch = () => {
+            return runAraiAttempt(
+                "freeword_search",
+                "window.onK()",
+                () => {
+                    if (typeof window.onK !== "function") throw new Error("window.onK is not ready");
+                    window.onK();
+                },
+                () => true
+            );
         };
 
         const activateAraiConditionMode = () => {
@@ -326,6 +342,48 @@
             return result;
         };
 
+        const activateAraiNameMode = () => {
+            const functionMode = typeof window.functionMenu?.getMode === "function"
+                ? window.functionMenu.getMode()
+                : null;
+            const result = {
+                functionMode,
+                cmSearchTabBefore: typeof window.cmSearchTab?.getMode === "function" ? window.cmSearchTab.getMode() : null,
+                johoTabBefore: typeof window.johoTab?.getMode === "function" ? window.johoTab.getMode() : window.johoTab?.mode ?? null
+            };
+
+            const listingNameMode = typeof window.SRAECH_MODE_SYAMEI !== "undefined"
+                ? window.SRAECH_MODE_SYAMEI
+                : 0;
+            const marketNameMode = typeof window.JOHO_MODE_SOUBA_NAME !== "undefined"
+                ? window.JOHO_MODE_SOUBA_NAME
+                : 0;
+
+            if (typeof window.cmSearchTab?.setMode === "function") {
+                const shouldSetListingMode = document.getElementById("tbSearchTab1") ||
+                    functionMode === window.FUNCTION_MODE_KENSAKU_CM;
+                if (shouldSetListingMode) {
+                    window.cmSearchTab.setMode(listingNameMode);
+                }
+            }
+
+            if (typeof window.johoTab?.setMode === "function") {
+                const shouldSetMarketMode = document.getElementById("johoTab1") ||
+                    functionMode === window.FUNCTION_MODE_JOHO;
+                if (shouldSetMarketMode) {
+                    window.johoTab.setMode(marketNameMode);
+                }
+            }
+
+            result.cmSearchTabAfter = typeof window.cmSearchTab?.getMode === "function" ? window.cmSearchTab.getMode() : null;
+            result.johoTabAfter = typeof window.johoTab?.getMode === "function" ? window.johoTab.getMode() : window.johoTab?.mode ?? null;
+            return result;
+        };
+
+        const activateAraiSearchMode = (searchKind) => searchKind === "name"
+            ? activateAraiNameMode()
+            : activateAraiConditionMode();
+
         const activateAraiConditionTab = () => {
             const result = {
                 method: "",
@@ -343,6 +401,30 @@
             }
 
             result.modeActivation = activateAraiConditionMode();
+
+            return result;
+        };
+
+        const activateAraiSearchTab = (searchKind) => {
+            const isName = searchKind === "name";
+            const result = {
+                method: "",
+                modeActivation: null
+            };
+            const marketTabId = isName ? "johoTab1" : "johoTab3";
+            const listingTabId = isName ? "tbSearchTab1" : "tbSearchTab5";
+
+            if (document.getElementById(marketTabId)) {
+                const clickResult = triggerAraiElementClick(marketTabId);
+                result.method = clickResult.method;
+            } else if (document.getElementById(listingTabId)) {
+                const clickResult = triggerAraiElementClick(listingTabId);
+                result.method = clickResult.method;
+            } else {
+                result.method = "setMode";
+            }
+
+            result.modeActivation = activateAraiSearchMode(searchKind);
 
             return result;
         };
@@ -365,12 +447,14 @@
                     return;
                 }
 
-                if (action === "activate_condition_tab") {
-                    const tabResult = activateAraiConditionTab();
+                if (action === "activate_name_tab" || action === "activate_condition_tab") {
+                    const searchKind = action === "activate_name_tab" ? "name" : "condition";
+                    const tabResult = activateAraiSearchTab(searchKind);
                     root?.setAttribute(ARAI_KAIJO_RESULT_ATTR, "1");
                     root?.removeAttribute(ARAI_KAIJO_ERROR_ATTR);
                     writeAraiKaijoDiagnostic({
-                        phase: "condition_tab",
+                        phase: `${searchKind}_tab`,
+                        searchKind,
                         method: tabResult.method,
                         modeActivation: tabResult.modeActivation,
                         before,
@@ -378,7 +462,8 @@
                     });
                     window.setTimeout(() => {
                         writeAraiKaijoDiagnostic({
-                            phase: "condition_tab_after_delay",
+                            phase: `${searchKind}_tab_after_delay`,
+                            searchKind,
                             method: tabResult.method,
                             modeActivation: tabResult.modeActivation,
                             before,
@@ -393,6 +478,23 @@
                     root?.removeAttribute(ARAI_KAIJO_ERROR_ATTR);
                     writeAraiKaijoDiagnostic({
                         phase: "diagnose_state",
+                        before,
+                        after: readAraiKaijoState(action)
+                    });
+                    return;
+                }
+
+                if (action === "freeword_search") {
+                    const freewordResult = runAraiFreewordSearch();
+                    root?.setAttribute(ARAI_KAIJO_RESULT_ATTR, freewordResult.ok ? "1" : "0");
+                    if (freewordResult.ok) {
+                        root?.removeAttribute(ARAI_KAIJO_ERROR_ATTR);
+                    } else {
+                        root?.setAttribute(ARAI_KAIJO_ERROR_ATTR, freewordResult.error || freewordResult.alertMessage || "Arai freeword search failed");
+                    }
+                    writeAraiKaijoDiagnostic({
+                        phase: "freeword_search",
+                        result: freewordResult,
                         before,
                         after: readAraiKaijoState(action)
                     });
@@ -417,8 +519,9 @@
                     return;
                 }
 
-                if (action === "next_auto") {
-                    const nextResult = runAraiNextAttempts();
+                if (action === "next_auto" || action === "next_name_auto") {
+                    const searchKind = action === "next_name_auto" ? "name" : "condition";
+                    const nextResult = runAraiNextAttempts(searchKind);
                     root?.setAttribute(ARAI_KAIJO_RESULT_ATTR, nextResult.ok ? "1" : "0");
                     if (nextResult.ok) {
                         root?.removeAttribute(ARAI_KAIJO_ERROR_ATTR);
@@ -426,7 +529,8 @@
                         root?.setAttribute(ARAI_KAIJO_ERROR_ATTR, "Arai next attempts did not reach condition form");
                     }
                     writeAraiKaijoDiagnostic({
-                        phase: "next_auto",
+                        phase: action,
+                        searchKind,
                         method: nextResult.method,
                         attempts: nextResult.attempts,
                         before,
@@ -434,7 +538,8 @@
                     });
                     window.setTimeout(() => {
                         writeAraiKaijoDiagnostic({
-                            phase: "next_auto_after_delay",
+                            phase: `${action}_after_delay`,
+                            searchKind,
                             method: nextResult.method,
                             attempts: nextResult.attempts,
                             before,

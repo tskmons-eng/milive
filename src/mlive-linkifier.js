@@ -1264,6 +1264,11 @@
             return String(value || "").trim();
         }
 
+        function normalizeSiteSearchBridgeKind(value) {
+            const text = String(value || "").trim();
+            return text === "name" || text === "condition" ? text : "";
+        }
+
         function createEmptySiteSearchBridgeSlotStore() {
             return {
                 version: MLIVE_SEARCH_BRIDGE_VERSION,
@@ -1282,6 +1287,7 @@
             return {
                 version: MLIVE_SEARCH_BRIDGE_VERSION,
                 sourceMode: normalizeSiteSearchBridgeMode(condition.sourceMode),
+                araiSearchKind: normalizeSiteSearchBridgeKind(condition.araiSearchKind || condition.searchKind),
                 fields: condition.fields.filter(Boolean),
                 summary: normalizeSearchBridgeSummary(condition.summary),
                 savedAt: Number.isFinite(savedAt) ? savedAt : Date.now(),
@@ -1305,8 +1311,41 @@
             return store;
         }
 
+        function getSiteSearchBridgeLocalStorage() {
+            return globalThis.chrome?.storage?.local || null;
+        }
+
+        function requireSiteSearchBridgeLocalStorage() {
+            const storage = getSiteSearchBridgeLocalStorage();
+            if (!storage) throw new Error("Extension storage is unavailable");
+            return storage;
+        }
+
+        function isSiteSearchBridgeStorageUnavailableError(error) {
+            const message = String(error?.message || error || "");
+            return /extension context invalidated/i.test(message) ||
+                /reading 'local'|reading "local"|storage is unavailable/i.test(message);
+        }
+
+        function renderSiteSearchBridgeStorageUnavailable(wrap, adapter) {
+            wrap.textContent = "";
+
+            const message = document.createElement("div");
+            message.textContent = "拡張更新後の古いページです。ページを再読み込みしてください。";
+            message.style.fontWeight = "700";
+            message.style.lineHeight = "1.5";
+            wrap.appendChild(message);
+
+            const close = createSiteSearchBridgeButton("閉じる", async () => {
+                renderSiteSearchBridgeLauncher(wrap, adapter);
+            });
+            close.style.marginTop = "6px";
+            wrap.appendChild(close);
+        }
+
         async function getSiteSearchBridgeSlotStore(storageKey) {
-            const result = await chrome.storage.local.get(storageKey);
+            const storage = requireSiteSearchBridgeLocalStorage();
+            const result = await storage.get(storageKey);
             return normalizeSiteSearchBridgeSlotStore(result[storageKey]);
         }
 
@@ -1322,7 +1361,7 @@
             if (!slot) return null;
 
             slot.condition = condition;
-            await chrome.storage.local.set({ [adapter.storageKey]: store });
+            await requireSiteSearchBridgeLocalStorage().set({ [adapter.storageKey]: store });
             return condition;
         }
 
@@ -1332,7 +1371,7 @@
             if (!slot) return null;
 
             slot.name = normalizeSearchBridgeSlotName(name, slot.id);
-            await chrome.storage.local.set({ [adapter.storageKey]: store });
+            await requireSiteSearchBridgeLocalStorage().set({ [adapter.storageKey]: store });
             return slot.name;
         }
 
@@ -1342,7 +1381,7 @@
             if (!slot) return null;
 
             slot.condition = null;
-            await chrome.storage.local.set({ [adapter.storageKey]: store });
+            await requireSiteSearchBridgeLocalStorage().set({ [adapter.storageKey]: store });
             return store;
         }
 
@@ -1376,7 +1415,7 @@
                 adapter.state.pendingApplied = false;
                 adapter.state.pendingRunning = false;
             }
-            await chrome.storage.local.set({ [adapter.pendingKey]: pending });
+            await requireSiteSearchBridgeLocalStorage().set({ [adapter.pendingKey]: pending });
             if (typeof adapter.afterPendingCreated === "function") {
                 await adapter.afterPendingCreated(pending, targetMode, savedCondition);
             }
@@ -1542,6 +1581,10 @@
                 }
             } catch (error) {
                 console.warn("MLive Linkifier: site bridge panel render failed", adapter.siteId, error);
+                if (isSiteSearchBridgeStorageUnavailableError(error)) {
+                    renderSiteSearchBridgeStorageUnavailable(wrap, adapter);
+                    return;
+                }
                 wrap.textContent = "保存条件を読み込めませんでした";
             }
         }
@@ -1640,6 +1683,7 @@
 
             const wrap = createSiteSearchBridgeContainer(adapter);
             if (!wrap) return;
+            if (adapter.buildId) wrap.dataset.searchBridgeBuild = adapter.buildId;
 
             renderSiteSearchBridgeLauncher(wrap, adapter);
         }
@@ -1661,12 +1705,15 @@
 
             adapter.state.pendingRunning = true;
             try {
-                const result = await chrome.storage.local.get(adapter.pendingKey);
+                const storage = getSiteSearchBridgeLocalStorage();
+                if (!storage) return;
+
+                const result = await storage.get(adapter.pendingKey);
                 const pending = result[adapter.pendingKey];
                 if (!pending) return;
 
                 if (pending.version !== MLIVE_SEARCH_BRIDGE_VERSION || !pending.condition) {
-                    await chrome.storage.local.remove(adapter.pendingKey);
+                    await storage.remove(adapter.pendingKey);
                     if (typeof adapter.afterPendingCleared === "function") {
                         await adapter.afterPendingCleared("invalid_pending", pending);
                     }
@@ -1674,7 +1721,7 @@
                 }
 
                 if (Date.now() - Number(pending.createdAt || 0) > SEARCH_BRIDGE_PENDING_MAX_AGE_MS) {
-                    await chrome.storage.local.remove(adapter.pendingKey);
+                    await storage.remove(adapter.pendingKey);
                     if (typeof adapter.afterPendingCleared === "function") {
                         await adapter.afterPendingCleared("expired_pending", pending);
                     }
@@ -1685,7 +1732,7 @@
 
                 const condition = normalizeSiteSearchBridgeCondition(pending.condition);
                 if (!condition) {
-                    await chrome.storage.local.remove(adapter.pendingKey);
+                    await storage.remove(adapter.pendingKey);
                     if (typeof adapter.afterPendingCleared === "function") {
                         await adapter.afterPendingCleared("empty_condition", pending);
                     }
@@ -1698,20 +1745,20 @@
                 }
 
                 if (typeof adapter.beforeRestore === "function") {
-                    adapter.beforeRestore(currentMode);
+                    adapter.beforeRestore(currentMode, condition);
                 }
 
-                if (!adapter.isRestoreReady()) {
+                if (!adapter.isRestoreReady(currentMode, condition)) {
                     scheduleSiteSearchBridgePendingRetry(adapter);
                     return;
                 }
 
                 adapter.restoreCondition(condition, currentMode);
                 adapter.state.pendingApplied = true;
-                await chrome.storage.local.remove(adapter.pendingKey);
+                await storage.remove(adapter.pendingKey);
 
                 showSiteSearchBridgeNotice(adapter, `保存条件で${adapter.getModeLabel(currentMode)}検索します`);
-                setTimeout(() => adapter.submitSearch(), 160);
+                setTimeout(() => adapter.submitSearch(condition, currentMode), 160);
             } catch (error) {
                 if (/extension context invalidated/i.test(String(error?.message || error))) {
                     return;
@@ -1945,6 +1992,8 @@
         const ARAI_KAIJO_DIAGNOSTIC_ATTR = "data-mlive-arai-kaijo-diagnostic";
         const ARAI_KAIJO_PROBE_ONLY_ATTR = "data-mlive-arai-kaijo-probe-only";
         const ARAI_KAIJO_ACTION_EVENT = "mlive-linkifier:arai-kaijo-action";
+        const ARAI_SEARCH_KIND_NAME = "name";
+        const ARAI_SEARCH_KIND_CONDITION = "condition";
 
         const araiSearchBridgeFlow = {
             pendingId: "",
@@ -2086,10 +2135,10 @@
 
         function getAraiSearchBridgeStage() {
             if (isAraiSearchBridgeLoading()) return "loading";
-            if (isAraiVenueSelectionStep() && !hasAraiConditionSearchButton()) {
+            if (isAraiVenueSelectionStep() && !hasAraiAnySearchButton()) {
                 return hasAraiSelectedVenue() ? "venue_selected" : "venue_select";
             }
-            if (hasAraiConditionSearchButton()) return "condition";
+            if (hasAraiAnySearchButton()) return "condition";
             if (hasAraiSearchBridgeResultContent()) return "result";
             return "unknown";
         }
@@ -2132,6 +2181,8 @@
                 hasBtnKaijo: isSearchBridgeElementVisible(document.getElementById("btn_kaijo")),
                 hasBtKaijoExe: isSearchBridgeElementVisible(document.getElementById("btKaijo_exe")),
                 hasConditionButton: hasAraiConditionSearchButton(),
+                hasNameButton: hasAraiSearchButtonForKind(ARAI_SEARCH_KIND_NAME),
+                hasAnySearchButton: hasAraiAnySearchButton(),
                 hasResultContent: hasAraiSearchBridgeResultContent(),
                 bridgeAction: root?.getAttribute(ARAI_KAIJO_ACTION_ATTR) || "",
                 bridgeResult: root?.getAttribute(ARAI_KAIJO_RESULT_ATTR) || "",
@@ -2288,6 +2339,86 @@
             return mode === "listing" || mode === "market";
         }
 
+        function getAraiSearchKindTabId(mode, searchKind) {
+            const kind = normalizeSiteSearchBridgeKind(searchKind) || ARAI_SEARCH_KIND_NAME;
+            if (mode === "market") return kind === ARAI_SEARCH_KIND_CONDITION ? "johoTab3" : "johoTab1";
+            return kind === ARAI_SEARCH_KIND_CONDITION ? "tbSearchTab5" : "tbSearchTab1";
+        }
+
+        function isAraiSearchKindTabActive(id) {
+            const tab = document.getElementById(id);
+            if (!tab) return false;
+
+            const classText = String(tab.className || "");
+            return /\b(active|on|selected|current)\b/i.test(classText);
+        }
+
+        function getAraiCurrentSearchKind() {
+            const mode = getAraiSearchBridgeMode();
+            if (isAraiSearchKindTabActive(getAraiSearchKindTabId(mode, ARAI_SEARCH_KIND_CONDITION))) {
+                return ARAI_SEARCH_KIND_CONDITION;
+            }
+            if (isAraiSearchKindTabActive(getAraiSearchKindTabId(mode, ARAI_SEARCH_KIND_NAME))) {
+                return ARAI_SEARCH_KIND_NAME;
+            }
+
+            if (isSearchBridgeElementVisible(document.getElementById("btAppointed"))) {
+                return ARAI_SEARCH_KIND_CONDITION;
+            }
+            if (isSearchBridgeElementVisible(document.getElementById("history_check"))) {
+                return ARAI_SEARCH_KIND_NAME;
+            }
+
+            return ARAI_SEARCH_KIND_NAME;
+        }
+
+        function isAraiConditionSearchFieldRecord(record) {
+            const marker = `${record?.id || ""} ${record?.name || ""} ${record?.label || ""}`.toLowerCase();
+            return /(nenshiki|year|odo|meter|soukou|mileage|hyoka|score|point|price|kakaku|color|colour|shaken|inspection|fuel|gas|cc|haiki|mission|shift|katashiki|modelyear)/i.test(marker);
+        }
+
+        function getAraiConditionSearchKind(condition) {
+            const explicitKind = normalizeSiteSearchBridgeKind(condition?.araiSearchKind || condition?.searchKind);
+            if (explicitKind) return explicitKind;
+
+            const fields = Array.isArray(condition?.fields) ? condition.fields : [];
+            return fields.some(record => isAraiConditionSearchFieldRecord(record))
+                ? ARAI_SEARCH_KIND_CONDITION
+                : ARAI_SEARCH_KIND_NAME;
+        }
+
+        function isAraiNameSearchFieldRecord(record) {
+            const id = String(record?.id || "");
+            const name = String(record?.name || "");
+            return id === "history_check" ||
+                name === "pattern" ||
+                id === "aaa" ||
+                /^(maker|model|car|grade|syasyu|syamei|shashu)\d+$/i.test(id);
+        }
+
+        function isAraiFieldCompatibleWithSearchKind(record, searchKind) {
+            const kind = normalizeSiteSearchBridgeKind(searchKind) || ARAI_SEARCH_KIND_NAME;
+            if (kind === ARAI_SEARCH_KIND_NAME) return isAraiNameSearchFieldRecord(record);
+            return !isAraiNameSearchFieldRecord(record);
+        }
+
+        function hasAraiNameSearchKeyword(condition = null) {
+            const fields = Array.isArray(condition?.fields) ? condition.fields : [];
+            if (fields.some(record => {
+                const id = String(record?.id || "");
+                const name = String(record?.name || "");
+                return (id === "history_check" || name === "pattern") && normalizeSearchBridgeText(record?.value);
+            })) return true;
+
+            return !!normalizeSearchBridgeText(document.getElementById("history_check")?.value || "");
+        }
+
+        function getAraiSearchKindAction(searchKind) {
+            return getAraiConditionSearchKind({ araiSearchKind: searchKind }) === ARAI_SEARCH_KIND_NAME
+                ? "activate_name_tab"
+                : "activate_condition_tab";
+        }
+
         function shouldInstallAraiSearchBridge() {
             const mode = getAraiSearchBridgeMode();
             if (isAraiSearchBridgeMode(mode)) return true;
@@ -2304,15 +2435,17 @@
             const sourceMode = getAraiSearchBridgeMode();
             if (!isAraiSearchBridgeMode(sourceMode)) return null;
 
+            const araiSearchKind = getAraiCurrentSearchKind();
             const fields = Array.from(document.querySelectorAll("input,select,textarea"))
                 .map(el => createSearchBridgeFieldRecord(el))
-                .filter(Boolean);
+                .filter(record => record && isAraiFieldCompatibleWithSearchKind(record, araiSearchKind));
 
             if (fields.length === 0) return null;
 
             return {
                 version: MLIVE_SEARCH_BRIDGE_VERSION,
                 sourceMode,
+                araiSearchKind,
                 fields,
                 summary: buildSiteSearchBridgeConditionSummary(fields),
                 savedAt: Date.now(),
@@ -2320,7 +2453,21 @@
             };
         }
 
-        function findAraiSearchBridgeControl(record) {
+        function findAraiSearchBridgeControl(record, searchKind = ARAI_SEARCH_KIND_NAME) {
+            const kind = getAraiConditionSearchKind({ araiSearchKind: searchKind });
+
+            if (kind === ARAI_SEARCH_KIND_NAME) {
+                if (record.id === "history_check" || record.name === "pattern") {
+                    return document.querySelector("input[name='pattern']") ||
+                        document.getElementById("history_check") ||
+                        findSearchBridgeControlByName(record);
+                }
+
+                if (record.id === "aaa") {
+                    return document.getElementById("aaa") || findSearchBridgeControlByName(record);
+                }
+            }
+
             if (record.id) {
                 const byId = document.getElementById(record.id);
                 if (byId) return byId;
@@ -2329,26 +2476,61 @@
             return findSearchBridgeControlByName(record);
         }
 
+        function clickAraiNameSearchMirrorControl(target) {
+            if (!target?.id) return false;
+
+            const makerMatch = String(target.id).match(/^(maker|model|car|grade|syasyu|syamei|shashu)(\d+)$/i);
+            const candidateIds = makerMatch ? [`t${makerMatch[2]}`, `${target.id}_label`, `${target.id}_btn`] : [];
+            for (const id of candidateIds) {
+                const mirror = document.getElementById(id);
+                if (isSearchBridgeElementVisible(mirror) && clickSearchBridgeElement(mirror, true)) return true;
+            }
+
+            const nearby = target.closest("li,td,div,label")?.querySelector("a,button,label,span");
+            return isSearchBridgeElementVisible(nearby) ? clickSearchBridgeElement(nearby, true) : false;
+        }
+
+        function applyAraiSearchBridgeFieldRecord(target, record, searchKind) {
+            const kind = getAraiConditionSearchKind({ araiSearchKind: searchKind });
+            const type = String(target?.type || "").toLowerCase();
+
+            if (kind === ARAI_SEARCH_KIND_NAME && (type === "checkbox" || type === "radio") && target.checked !== !!record.checked) {
+                clickAraiNameSearchMirrorControl(target);
+            }
+
+            applySearchBridgeFieldRecord(target, record);
+
+            if (kind === ARAI_SEARCH_KIND_NAME && (target.id === "history_check" || target.name === "pattern")) {
+                target.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
+                target.dispatchEvent(new Event("blur", { bubbles: true }));
+            }
+        }
+
         function restoreAraiSearchBridgeCondition(condition) {
+            const targetSearchKind = getAraiConditionSearchKind(condition);
             if (araiSearchBridgeFlow.conditionFormLoggedUrl !== location.href) {
                 araiSearchBridgeFlow.conditionFormLoggedUrl = location.href;
                 recordAraiSearchBridgeLog("条件フォーム到達", {
                     targetMode: getAraiSearchBridgeMode(),
+                    targetSearchKind,
                     fieldCount: condition.fields?.length || 0
                 });
             }
 
             let restoredCount = 0;
             for (const record of condition.fields || []) {
-                const target = findAraiSearchBridgeControl(record);
+                if (!isAraiFieldCompatibleWithSearchKind(record, targetSearchKind)) continue;
+
+                const target = findAraiSearchBridgeControl(record, targetSearchKind);
                 if (!target) continue;
 
-                applySearchBridgeFieldRecord(target, record);
+                applyAraiSearchBridgeFieldRecord(target, record, targetSearchKind);
                 restoredCount += 1;
             }
 
             recordAraiSearchBridgeLog("条件復元", {
                 targetMode: getAraiSearchBridgeMode(),
+                targetSearchKind,
                 restoredCount,
                 fieldCount: condition.fields?.length || 0
             });
@@ -2376,6 +2558,16 @@
             }
         }
 
+        function activateAraiSearchBridgeTargetTab(mode, condition) {
+            const targetSearchKind = getAraiConditionSearchKind(condition);
+            if (isAraiSearchBridgeLoading() || hasAraiSearchButtonForKind(targetSearchKind)) return;
+
+            const tab = document.getElementById(getAraiSearchKindTabId(mode, targetSearchKind));
+            if (isSearchBridgeElementVisible(tab)) {
+                tab.click();
+            }
+        }
+
         function getVisibleAraiSearchButton(ids) {
             for (const id of ids) {
                 const button = document.getElementById(id);
@@ -2385,11 +2577,85 @@
             return null;
         }
 
+        function getAraiNameSearchButton() {
+            const mode = getAraiSearchBridgeMode();
+            const nameTabActive = isAraiSearchKindTabActive(getAraiSearchKindTabId(mode, ARAI_SEARCH_KIND_NAME));
+            const nameInputVisible = isSearchBridgeElementVisible(document.getElementById("history_check"));
+            if (!nameTabActive && !nameInputVisible) return null;
+
+            if (normalizeSearchBridgeText(document.getElementById("history_check")?.value || "")) {
+                const freewordButton = getAraiFreewordSearchButton();
+                if (freewordButton) return freewordButton;
+            }
+
+            return getVisibleAraiSearchButton(["btSearch"]) ||
+                findVisibleSearchBridgeButtonByText("縺薙・譚｡莉ｶ縺ｧ讀懃ｴ｢");
+        }
+
+        function getAraiFreewordSearchButton() {
+            const directLink = Array.from(document.querySelectorAll("a[href]"))
+                .find(el => /onK\s*\(\s*\)\s*;?/i.test(String(el.getAttribute("href") || "")) &&
+                    isSearchBridgeElementVisible(el));
+            if (directLink) return directLink;
+
+            const historyInput = document.getElementById("history_check");
+            const nearbyButton = historyInput
+                ? Array.from(historyInput.parentElement?.querySelectorAll("button,input[type='button'],input[type='submit'],a") || [])
+                    .find(isSearchBridgeElementVisible)
+                : null;
+
+            return findVisibleSearchBridgeButtonByText("フリーワード検索") ||
+                nearbyButton ||
+                Array.from(document.querySelectorAll("button,input[type='button'],input[type='submit'],a"))
+                    .find(el => normalizeSearchBridgeText(el.textContent || el.value || "").includes("フリーワード") && isSearchBridgeElementVisible(el)) ||
+                null;
+        }
+
+        function getAraiNameSearchButtonForCondition(condition = null) {
+            if (hasAraiNameSearchKeyword(condition)) {
+                const freewordButton = getAraiFreewordSearchButton();
+                if (freewordButton) return freewordButton;
+            }
+
+            return getAraiNameSearchButton();
+        }
+
+        function getAraiConditionSearchButton() {
+            const mode = getAraiSearchBridgeMode();
+            const conditionTabActive = isAraiSearchKindTabActive(getAraiSearchKindTabId(mode, ARAI_SEARCH_KIND_CONDITION));
+            const nameTabActive = isAraiSearchKindTabActive(getAraiSearchKindTabId(mode, ARAI_SEARCH_KIND_NAME));
+            const nameInputVisible = isSearchBridgeElementVisible(document.getElementById("history_check"));
+            const mayUseBtSearch = conditionTabActive || (!nameTabActive && !nameInputVisible);
+            return getVisibleAraiSearchButton(["btAppointed"]) ||
+                (mayUseBtSearch ? getVisibleAraiSearchButton(["btSearch"]) : null) ||
+                (mayUseBtSearch ? findVisibleSearchBridgeButtonByText("縺薙・譚｡莉ｶ縺ｧ讀懃ｴ｢") : null);
+        }
+
+        function getAraiSearchButtonForKind(searchKind, condition = null) {
+            return getAraiConditionSearchKind({ araiSearchKind: searchKind }) === ARAI_SEARCH_KIND_NAME
+                ? getAraiNameSearchButtonForCondition(condition)
+                : getAraiConditionSearchButton();
+        }
+
+        function hasAraiSearchButtonForKind(searchKind, condition = null) {
+            return !!getAraiSearchButtonForKind(searchKind, condition);
+        }
+
+        function hasAraiAnySearchButton() {
+            return !!(getAraiNameSearchButton() || getAraiConditionSearchButton());
+        }
+
+        function isAraiSearchBridgeInputFormReady() {
+            if (isAraiVenueSelectionStep()) return false;
+
+            return isSearchBridgeElementVisible(document.getElementById("btBackToMake2")) ||
+                isSearchBridgeElementVisible(document.getElementById("btAddTerms")) ||
+                isSearchBridgeElementVisible(document.getElementById("btSearch")) ||
+                isSearchBridgeElementVisible(document.getElementById("btAppointed"));
+        }
+
         function hasAraiConditionSearchButton() {
-            return !!(
-                getVisibleAraiSearchButton(["btSearch", "btAppointed"]) ||
-                findVisibleSearchBridgeButtonByText("この条件で検索")
-            );
+            return !!getAraiConditionSearchButton();
         }
 
         function isAraiVenueSelectionStep() {
@@ -2491,7 +2757,8 @@
         async function advanceAraiVenueSelection(pending = null) {
             if (pending) ensureAraiSearchBridgeFlow(pending);
             if (araiSearchBridgeFlow.stopped) return { handled: true, delay: 0 };
-            if (hasAraiConditionSearchButton()) return { handled: false, delay: 0 };
+            const targetSearchKind = getAraiConditionSearchKind(pending?.condition);
+            const targetTabAction = getAraiSearchKindAction(targetSearchKind);
 
             const repeatCount = updateAraiVenueRepeatState();
             if (!araiSearchBridgeFlow.venuePageLogged) {
@@ -2503,7 +2770,7 @@
             }
 
             if (!araiSearchBridgeFlow.conditionTabActivated) {
-                const tabResult = runAraiKaijoSelectorAction("activate_condition_tab");
+                const tabResult = runAraiKaijoSelectorAction(targetTabAction);
                 recordAraiSearchBridgeLog("Arai condition tab activated", {
                     ok: tabResult.ok,
                     error: tabResult.error,
@@ -2614,7 +2881,7 @@
             }
 
             if (!araiSearchBridgeFlow.nextAttempted) {
-                const conditionTabResultBeforeNext = runAraiKaijoSelectorAction("activate_condition_tab");
+                const conditionTabResultBeforeNext = runAraiKaijoSelectorAction(targetTabAction);
                 await waitForAraiBridgeDelay(150);
 
                 let venueSelectionResultBeforeNext = null;
@@ -2650,13 +2917,13 @@
                 araiSearchBridgeFlow.awaitingConditionAfterNext = true;
                 await waitForAraiBridgeDelay(1800);
 
-                if (domNextClicked && hasAraiConditionSearchButton()) {
+                if (domNextClicked && !isAraiVenueSelectionStep() && hasAraiSearchButtonForKind(targetSearchKind, pending?.condition)) {
                     actionResult.ok = true;
                 } else if (!domNextClicked) {
-                    actionResult = runAraiKaijoSelectorAction("next_auto");
+                    actionResult = runAraiKaijoSelectorAction(targetSearchKind === ARAI_SEARCH_KIND_NAME ? "next_name_auto" : "next_auto");
                     await waitForAraiBridgeDelay(1800);
                     actionResult.method = actionResult.diagnostic?.method || "main-world:next_auto";
-                    if (hasAraiConditionSearchButton()) actionResult.ok = true;
+                    if (!isAraiVenueSelectionStep() && hasAraiSearchButtonForKind(targetSearchKind, pending?.condition)) actionResult.ok = true;
                 } else {
                     actionResult.ok = true;
                     actionResult.method = "dom-click:btKaijo_exe:await-condition";
@@ -2684,7 +2951,7 @@
                     return { handled: true, delay: 1000 };
                 }
 
-                if (hasAraiConditionSearchButton()) {
+                if (!isAraiVenueSelectionStep() && hasAraiSearchButtonForKind(targetSearchKind, pending?.condition)) {
                     return { handled: false, delay: 0 };
                 }
 
@@ -2717,8 +2984,9 @@
 
         async function handleAraiPendingBeforeRestore(pending, currentMode) {
             ensureAraiSearchBridgeFlow(pending);
+            const targetSearchKind = getAraiConditionSearchKind(pending?.condition);
 
-            if (isAraiVenueSelectionStep() && !hasAraiConditionSearchButton()) {
+            if (isAraiVenueSelectionStep()) {
                 araiPendingLoadingStartedAt = 0;
                 const result = await advanceAraiVenueSelection(pending, currentMode);
                 if (result.delay > 0 && !araiSearchBridgeFlow.stopped) {
@@ -2741,11 +3009,17 @@
                 return true;
             }
 
+            if (!isAraiSearchBridgeInputFormReady()) {
+                scheduleSiteSearchBridgePendingRetry(getAraiSearchBridgeAdapter(), 700);
+                return true;
+            }
+
             araiPendingLoadingStartedAt = 0;
-            if (hasAraiConditionSearchButton() && araiSearchBridgeFlow.conditionFormLoggedUrl !== location.href) {
+            if (!isAraiVenueSelectionStep() && hasAraiSearchButtonForKind(targetSearchKind, pending?.condition) && araiSearchBridgeFlow.conditionFormLoggedUrl !== location.href) {
                 araiSearchBridgeFlow.conditionFormLoggedUrl = location.href;
                 recordAraiSearchBridgeLog("条件フォーム到達", {
                     targetMode: currentMode,
+                    targetSearchKind,
                     beforeRestore: true
                 });
             }
@@ -2753,35 +3027,69 @@
             return false;
         }
 
-        async function submitAraiSearchBridge() {
-            if (isAraiVenueSelectionStep() && !hasAraiConditionSearchButton()) {
-                const result = await advanceAraiVenueSelection();
+        async function submitAraiSearchBridge(condition = null) {
+            const targetSearchKind = getAraiConditionSearchKind(condition);
+            if (isAraiVenueSelectionStep()) {
+                const result = await advanceAraiVenueSelection({ condition });
                 if (result.handled) return;
             }
 
-            const conditionButton = getVisibleAraiSearchButton(["btSearch", "btAppointed"]) ||
-                findVisibleSearchBridgeButtonByText("この条件で検索") ||
+            if (targetSearchKind === ARAI_SEARCH_KIND_NAME && hasAraiNameSearchKeyword(condition)) {
+                await waitForAraiBridgeDelay(450);
+            }
+
+            const restoredNameKeyword = normalizeSearchBridgeText(document.getElementById("history_check")?.value || "");
+            if (restoredNameKeyword) {
+                await waitForAraiBridgeDelay(900);
+                const freewordButton = getAraiFreewordSearchButton();
+                if (freewordButton) {
+                    const buttonInfo = {
+                        buttonId: freewordButton?.id || "",
+                        targetSearchKind: ARAI_SEARCH_KIND_NAME,
+                        buttonText: normalizeSearchBridgeText(freewordButton?.textContent || freewordButton?.value || ""),
+                        keyword: restoredNameKeyword,
+                        method: "freeword_keyword"
+                    };
+                    recordAraiSearchBridgeLog("arai_search_submit", buttonInfo);
+                    await markAraiSearchBridgeAwaitingResult(buttonInfo);
+                    const mainResult = runAraiKaijoSelectorAction("freeword_search");
+                    if (mainResult.ok) {
+                        recordAraiSearchBridgeLog("arai_freeword_search_main", {
+                            ok: true,
+                            diagnostic: mainResult.diagnostic
+                        });
+                        return;
+                    }
+                    recordAraiSearchBridgeLog("arai_freeword_search_main", {
+                        ok: false,
+                        error: mainResult.error,
+                        diagnostic: mainResult.diagnostic
+                    });
+                    clickSearchBridgeElement(freewordButton, true);
+                    return;
+                }
+            }
+
+            const searchButton = getAraiSearchButtonForKind(targetSearchKind, condition) ||
                 (!isAraiVenueSelectionStep() ? findVisibleSearchBridgeButtonByText("次へ") : null);
 
-            if (conditionButton) {
-                recordAraiSearchBridgeLog("検索実行", {
-                    buttonId: conditionButton?.id || "",
-                    buttonText: normalizeSearchBridgeText(conditionButton?.textContent || conditionButton?.value || "")
-                });
-                await markAraiSearchBridgeAwaitingResult({
-                    buttonId: conditionButton?.id || "",
-                    buttonText: normalizeSearchBridgeText(conditionButton?.textContent || conditionButton?.value || "")
-                });
-                clickSearchBridgeElement(conditionButton, true);
+            if (searchButton) {
+                const buttonInfo = {
+                    buttonId: searchButton?.id || "",
+                    targetSearchKind,
+                    buttonText: normalizeSearchBridgeText(searchButton?.textContent || searchButton?.value || "")
+                };
+                recordAraiSearchBridgeLog("arai_search_submit", buttonInfo);
+                await markAraiSearchBridgeAwaitingResult(buttonInfo);
+                clickSearchBridgeElement(searchButton, true);
                 return;
             }
 
             if (clickAraiVenueSearchIfReady()) return;
 
-            recordAraiSearchBridgeLog("失敗停止", { reason: "検索ボタンが見つかりません" });
+            recordAraiSearchBridgeLog("arai_search_button_missing", { targetSearchKind });
             showSiteSearchBridgeNotice(getAraiSearchBridgeAdapter(), "検索ボタンが見つかりません", "error");
         }
-
         function getAraiSearchBridgeAdapter() {
             return {
                 siteId: "arai",
@@ -2789,6 +3097,7 @@
                 storageKey: ARAI_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: ARAI_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "arai-search-bridge-ui",
+                buildId: "arai-name-venue-guard-main-onk-20260708",
                 position: { right: "12px", top: "132px" },
                 launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.arai,
@@ -2827,12 +3136,14 @@
                     });
                 },
                 beforePendingRestore: handleAraiPendingBeforeRestore,
-                beforeRestore: activateAraiSearchBridgeConditionTab,
+                beforeRestore: activateAraiSearchBridgeTargetTab,
                 restoreCondition: restoreAraiSearchBridgeCondition,
                 getTargetUrl: getAraiSearchBridgeTargetUrl,
-                isRestoreReady: () => isAraiSearchBridgeMode(getAraiSearchBridgeMode()) &&
+                isRestoreReady: (_currentMode, condition) => isAraiSearchBridgeMode(getAraiSearchBridgeMode()) &&
                     !isAraiSearchBridgeLoading() &&
-                    hasAraiConditionSearchButton() &&
+                    !isAraiVenueSelectionStep() &&
+                    isAraiSearchBridgeInputFormReady() &&
+                    hasAraiSearchButtonForKind(getAraiConditionSearchKind(condition), condition) &&
                     document.querySelectorAll("input,select,textarea").length > 0,
                 submitSearch: submitAraiSearchBridge
             };
