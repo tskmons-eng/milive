@@ -268,6 +268,10 @@
         const ARAI_SEARCH_BRIDGE_RUN_KEY = "araiSearchBridgeRunState";
         const ARAI_NAME_DIAGNOSTIC_KEY = "araiNameCascadeDiagnostic";
         const JU_SELECTION_CASCADE_SESSION_KEY = "mliveLinkifierJuSelectionCascade";
+        const JU_MAIN_ACTION_ATTR = "data-mlive-ju-main-action";
+        const JU_MAIN_ACTION_RESULT_ATTR = "data-mlive-ju-main-action-result";
+        const JU_MAIN_ACTION_TOKEN_ATTR = "data-mlive-ju-main-action-token";
+        const JU_MAIN_ACTION_EVENT = "mlive-linkifier:ju-main-action";
         const ARAI_PENDING_FALLBACK_ATTR = "data-mlive-arai-pending-fallback";
         const ARAI_PENDING_FALLBACK_COMMAND_ATTR = "data-mlive-arai-pending-fallback-command";
         const ARAI_PENDING_FALLBACK_RESULT_ATTR = "data-mlive-arai-pending-fallback-result";
@@ -288,6 +292,7 @@
         const MLIVE_NORMAL_AA_CODES = new Set(["131", "220", "132"]);
         let mliveSearchBridgePendingRunning = false;
         let mliveSearchBridgePendingApplied = false;
+        let juMainActionSequence = 0;
         const siteSearchBridgeState = {
             arai: {
                 pendingRunning: false,
@@ -4537,17 +4542,36 @@
             return !!button && !button.disabled && button.getAttribute("aria-disabled") !== "true";
         }
 
+        function runJuMainAction(element, action, detail = {}) {
+            const root = document.documentElement;
+            if (!root || !element) return null;
+
+            const token = `ju-${Date.now().toString(36)}-${++juMainActionSequence}`;
+            try {
+                element.setAttribute(JU_MAIN_ACTION_TOKEN_ATTR, token);
+                root.removeAttribute(JU_MAIN_ACTION_RESULT_ATTR);
+                root.setAttribute(JU_MAIN_ACTION_ATTR, JSON.stringify({ token, action, ...detail }));
+                window.dispatchEvent(new Event(JU_MAIN_ACTION_EVENT));
+
+                const raw = root.getAttribute(JU_MAIN_ACTION_RESULT_ATTR);
+                const result = raw ? JSON.parse(raw) : null;
+                return result && typeof result === "object" ? result : null;
+            } catch {
+                return null;
+            } finally {
+                element.removeAttribute(JU_MAIN_ACTION_TOKEN_ATTR);
+                root.removeAttribute(JU_MAIN_ACTION_ATTR);
+            }
+        }
+
         function clickJuSelectionCascadeElement(element) {
             if (!element || element.disabled) return false;
+            return !!runJuMainAction(element, "click")?.ok;
+        }
 
-            try {
-                // JU's React modal must receive each action exactly once. Dispatching a
-                // synthetic click and then calling click() toggles checkboxes twice.
-                element.click();
-                return true;
-            } catch {
-                return false;
-            }
+        function setJuSelectionCascadeCheckbox(input, checked) {
+            if (!input || input.disabled) return false;
+            return !!runJuMainAction(input, "change", { checked: !!checked })?.ok;
         }
 
         async function restoreJuSelectionCascade(cascade, targetMode) {
@@ -4572,7 +4596,7 @@
 
                 const carInput = await wait(() => findJuSelectionCascadeCheckbox(getJuSelectionCascadePopup(), "CarNameCheckbox", car.car));
                 if (!carInput) return false;
-                if (!carInput.checked && !clickJuSelectionCascadeElement(carInput)) return false;
+                if (!carInput.checked && !setJuSelectionCascadeCheckbox(carInput, true)) return false;
 
                 const selectedCar = await wait(() => {
                     const current = findJuSelectionCascadeCheckbox(getJuSelectionCascadePopup(), "CarNameCheckbox", car.car);
@@ -4598,7 +4622,7 @@
                     for (const grade of car.grades) {
                         const gradeInput = await wait(() => findJuSelectionCascadeCheckbox(getJuSelectionCascadePopup(), "Checkbox3", grade));
                         if (!gradeInput) return false;
-                        if (!gradeInput.checked && !clickJuSelectionCascadeElement(gradeInput)) return false;
+                        if (!gradeInput.checked && !setJuSelectionCascadeCheckbox(gradeInput, true)) return false;
 
                         const selectedGrade = await wait(() => {
                             const current = findJuSelectionCascadeCheckbox(getJuSelectionCascadePopup(), "Checkbox3", grade);
@@ -4944,7 +4968,7 @@
                 storageKey: JU_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: JU_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "ju-search-bridge-ui",
-                buildId: "ju-single-click-restore-20260710",
+                buildId: "ju-main-react-bridge-20260710",
                 position: { right: "12px", top: "84px" },
                 launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.ju,
