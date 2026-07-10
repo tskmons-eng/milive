@@ -3178,29 +3178,19 @@
                     return { handled: true, delay: 900 };
                 }
 
-                let actionResult = {
-                    ok: false,
-                    error: "",
-                    method: "dom-click:btKaijo_exe",
-                    diagnostic: null
-                };
-                const domNextClicked = clickSearchBridgeElement(nextButton, true);
+                // Arai's venue button has site-side default navigation. Run it only through the MAIN-world adapter.
+                let actionResult = runAraiKaijoSelectorAction(targetSearchKind === ARAI_SEARCH_KIND_NAME ? "next_name_auto" : "next_auto");
                 araiSearchBridgeFlow.nextAttempted = true;
                 araiSearchBridgeFlow.nextAttemptedAt = Date.now();
                 araiSearchBridgeFlow.nextAttemptCount += 1;
                 araiSearchBridgeFlow.awaitingConditionAfterNext = true;
                 await waitForAraiBridgeDelay(1800);
 
-                if (domNextClicked && !isAraiVenueSelectionStep(pending?.condition) && hasAraiSearchButtonForKind(targetSearchKind, pending?.condition)) {
-                    actionResult.ok = true;
-                } else if (!domNextClicked) {
-                    actionResult = runAraiKaijoSelectorAction(targetSearchKind === ARAI_SEARCH_KIND_NAME ? "next_name_auto" : "next_auto");
-                    await waitForAraiBridgeDelay(1800);
-                    actionResult.method = actionResult.diagnostic?.method || "main-world:next_auto";
-                    if (!isAraiVenueSelectionStep(pending?.condition) && hasAraiSearchButtonForKind(targetSearchKind, pending?.condition)) actionResult.ok = true;
-                } else {
-                    actionResult.ok = true;
-                    actionResult.method = "dom-click:btKaijo_exe:await-condition";
+                actionResult.method = actionResult.diagnostic?.method || "main-world:next_auto";
+                actionResult.ok = !isAraiVenueSelectionStep(pending?.condition) &&
+                    hasAraiSearchButtonForKind(targetSearchKind, pending?.condition);
+                if (!actionResult.ok && !actionResult.error) {
+                    actionResult.error = "Arai's next action did not open the target search form";
                 }
                 recordAraiSearchBridgeLog("次へ実行", {
                     ok: actionResult.ok,

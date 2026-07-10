@@ -335,40 +335,24 @@
                     refreshTargetMode();
                 }, hasTargetForm);
                 attempts.push(attempt);
-                return attempt.ok;
+                return attempt;
             };
 
-            if (tryAttempt("jquery-trigger(btKaijo_exe)", () => {
+            const jqueryAttempt = tryAttempt("jquery-trigger(btKaijo_exe)", () => {
                 activateAraiSearchMode(searchKind);
                 setAraiFourWheelDomSelection();
                 const result = triggerAraiElementClick("btKaijo_exe");
                 if (!result.ok) throw new Error(result.error);
-            })) return { ok: true, method: attempts.at(-1).label, attempts };
+            });
+            if (jqueryAttempt.ok) return { ok: true, method: jqueryAttempt.label, attempts };
+            if (jqueryAttempt.alertMessage) {
+                return { ok: false, method: jqueryAttempt.label, error: jqueryAttempt.alertMessage, attempts };
+            }
 
-            if (tryAttempt("cmKaijoSelector.onclick(btKaijo_exe)", () => {
-                activateAraiSearchMode(searchKind);
-                setAraiFourWheelDomSelection();
-                if (typeof window.cmKaijoSelector?.onclick !== "function") throw new Error("cmKaijoSelector.onclick is not ready");
-                window.cmKaijoSelector.onclick("btKaijo_exe");
-            })) return { ok: true, method: attempts.at(-1).label, attempts };
-
-            if (tryAttempt("activateMode+doKaijoSend", () => {
-                activateAraiSearchMode(searchKind);
-                setAraiFourWheelDomSelection();
-                if (typeof window.cmKaijoSelector?.doKaijoSend !== "function") throw new Error("cmKaijoSelector.doKaijoSend is not ready");
-                window.cmKaijoSelector.doKaijoSend();
-            })) return { ok: true, method: attempts.at(-1).label, attempts };
-
-            if (tryAttempt("doQuerySelsct", () => {
-                if (typeof window.cmKaijoSelector?.doQuerySelsct !== "function") throw new Error("cmKaijoSelector.doQuerySelsct is not ready");
-                window.cmKaijoSelector.doQuerySelsct();
-            })) return { ok: true, method: attempts.at(-1).label, attempts };
-
-            if (searchKind !== "name" && tryAttempt("force-condition-render", () => {
-                forceAraiConditionRender();
-            })) return { ok: true, method: attempts.at(-1).label, attempts };
-
-            return { ok: false, method: "", attempts };
+            // The site's own button may render the next form asynchronously. Do not invoke alternate
+            // send methods: they can bypass the browser event and redirect to the public portal.
+            if (!jqueryAttempt.error) return { ok: true, method: jqueryAttempt.label, attempts };
+            return { ok: false, method: jqueryAttempt.label, error: jqueryAttempt.error, attempts };
         };
 
         const runAraiFreewordSearch = () => {
