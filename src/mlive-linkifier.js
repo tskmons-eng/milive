@@ -266,9 +266,11 @@
         const ARAI_SEARCH_BRIDGE_PENDING_KEY = "araiSearchBridgePending";
         const ARAI_SEARCH_BRIDGE_LOG_KEY = "araiSearchBridgeDebugLog";
         const ARAI_SEARCH_BRIDGE_RUN_KEY = "araiSearchBridgeRunState";
-        const ARAI_SEARCH_BRIDGE_NAVIGATION_KEY = "mliveLinkifierAraiSearchBridgeNavigation";
+        const ARAI_PENDING_FALLBACK_ATTR = "data-mlive-arai-pending-fallback";
+        const ARAI_PENDING_FALLBACK_COMMAND_ATTR = "data-mlive-arai-pending-fallback-command";
+        const ARAI_PENDING_FALLBACK_RESULT_ATTR = "data-mlive-arai-pending-fallback-result";
+        const ARAI_PENDING_FALLBACK_EVENT = "mlive-linkifier:arai-pending-fallback";
         const ARAI_SEARCH_BRIDGE_LOG_LIMIT = 80;
-        const ARAI_PENDING_LOOKUP_MAX_AGE_MS = 12 * 1000;
         const SEARCH_BRIDGE_PENDING_MAX_AGE_MS = 10 * 60 * 1000;
         const JU_SEARCH_BRIDGE_SLOTS_KEY = "juSearchBridgeSlots";
         const JU_SEARCH_BRIDGE_PENDING_KEY = "juSearchBridgePending";
@@ -279,10 +281,7 @@
             arai: {
                 pendingRunning: false,
                 pendingApplied: false,
-                pendingRetryTimer: null,
-                pendingLookupStartedAt: 0,
-                pendingLookupAttempts: 0,
-                pendingLookupMissingLogged: false
+                pendingRetryTimer: null
             },
             ju: { pendingRunning: false, pendingApplied: false }
         };
@@ -1718,28 +1717,28 @@
             adapter.state.pendingRunning = true;
             try {
                 const storage = getSiteSearchBridgeLocalStorage();
-                if (!storage) {
-                    if (typeof adapter.onPendingStorageUnavailable === "function") {
-                        adapter.onPendingStorageUnavailable(currentMode);
-                    }
-                    return;
-                }
-
-                const result = await storage.get(adapter.pendingKey);
-                const pending = result[adapter.pendingKey];
+                const result = storage ? await storage.get(adapter.pendingKey) : {};
+                const storedPending = result[adapter.pendingKey];
+                const fallbackPending = !storedPending && typeof adapter.getPendingFallback === "function"
+                    ? adapter.getPendingFallback(currentMode)
+                    : null;
+                const pending = storedPending || fallbackPending;
                 if (!pending) {
-                    if (typeof adapter.onPendingMissing === "function") {
+                    if (!storage && typeof adapter.onPendingStorageUnavailable === "function") {
+                        adapter.onPendingStorageUnavailable(currentMode);
+                    } else if (typeof adapter.onPendingMissing === "function") {
                         adapter.onPendingMissing(currentMode);
                     }
                     return;
                 }
 
                 if (typeof adapter.onPendingFound === "function") {
-                    adapter.onPendingFound(pending, currentMode);
+                    adapter.onPendingFound(pending, currentMode, { fromFallback: !!fallbackPending });
                 }
 
                 if (pending.version !== MLIVE_SEARCH_BRIDGE_VERSION || !pending.condition) {
-                    await storage.remove(adapter.pendingKey);
+                    if (storage) await storage.remove(adapter.pendingKey);
+                    if (typeof adapter.clearPendingFallback === "function") adapter.clearPendingFallback();
                     if (typeof adapter.afterPendingCleared === "function") {
                         await adapter.afterPendingCleared("invalid_pending", pending);
                     }
@@ -1747,7 +1746,8 @@
                 }
 
                 if (Date.now() - Number(pending.createdAt || 0) > SEARCH_BRIDGE_PENDING_MAX_AGE_MS) {
-                    await storage.remove(adapter.pendingKey);
+                    if (storage) await storage.remove(adapter.pendingKey);
+                    if (typeof adapter.clearPendingFallback === "function") adapter.clearPendingFallback();
                     if (typeof adapter.afterPendingCleared === "function") {
                         await adapter.afterPendingCleared("expired_pending", pending);
                     }
@@ -1758,7 +1758,8 @@
 
                 const condition = normalizeSiteSearchBridgeCondition(pending.condition);
                 if (!condition) {
-                    await storage.remove(adapter.pendingKey);
+                    if (storage) await storage.remove(adapter.pendingKey);
+                    if (typeof adapter.clearPendingFallback === "function") adapter.clearPendingFallback();
                     if (typeof adapter.afterPendingCleared === "function") {
                         await adapter.afterPendingCleared("empty_condition", pending);
                     }
@@ -1786,7 +1787,8 @@
                 }
 
                 adapter.state.pendingApplied = true;
-                await storage.remove(adapter.pendingKey);
+                if (storage) await storage.remove(adapter.pendingKey);
+                if (typeof adapter.clearPendingFallback === "function") adapter.clearPendingFallback();
 
                 showSiteSearchBridgeNotice(adapter, `保存条件で${adapter.getModeLabel(currentMode)}検索します`);
                 setTimeout(() => adapter.submitSearch(condition, currentMode), 160);
@@ -2072,98 +2074,56 @@
             });
         }
 
-        function getAraiPendingNavigationMarker() {
+        function runAraiPendingFallbackAction(command, payload = "") {
+            const root = document.documentElement;
+            if (!root) return false;
+
             try {
-                const raw = sessionStorage.getItem(ARAI_SEARCH_BRIDGE_NAVIGATION_KEY);
-                if (!raw) return null;
+                if (payload) root.setAttribute(ARAI_PENDING_FALLBACK_ATTR, payload);
+                root.setAttribute(ARAI_PENDING_FALLBACK_COMMAND_ATTR, command);
+                window.dispatchEvent(new Event(ARAI_PENDING_FALLBACK_EVENT));
+                return root.getAttribute(ARAI_PENDING_FALLBACK_RESULT_ATTR) === "1";
+            } catch {
+                return false;
+            } finally {
+                root.removeAttribute(ARAI_PENDING_FALLBACK_COMMAND_ATTR);
+            }
+        }
 
-                const marker = JSON.parse(raw);
-                if (!marker || Date.now() - Number(marker.createdAt || 0) > ARAI_PENDING_LOOKUP_MAX_AGE_MS) {
-                    sessionStorage.removeItem(ARAI_SEARCH_BRIDGE_NAVIGATION_KEY);
-                    return null;
-                }
+        function setAraiPendingFallback(pending) {
+            try {
+                return runAraiPendingFallbackAction("save", JSON.stringify(pending));
+            } catch {
+                return false;
+            }
+        }
 
-                return marker;
+        function getAraiPendingFallback() {
+            const root = document.documentElement;
+            if (!root) return null;
+
+            runAraiPendingFallbackAction("read");
+            try {
+                const raw = root.getAttribute(ARAI_PENDING_FALLBACK_ATTR);
+                const pending = raw ? JSON.parse(raw) : null;
+                return pending && typeof pending === "object" ? pending : null;
             } catch {
                 return null;
             }
         }
 
-        function setAraiPendingNavigationMarker(pending) {
-            try {
-                sessionStorage.setItem(ARAI_SEARCH_BRIDGE_NAVIGATION_KEY, JSON.stringify({
-                    id: getAraiSearchBridgePendingId(pending),
-                    targetMode: normalizeSiteSearchBridgeMode(pending?.targetMode),
-                    createdAt: Date.now()
-                }));
-            } catch {
-                // Storage diagnostics remain available even when session storage is blocked.
-            }
+        function clearAraiPendingFallback() {
+            runAraiPendingFallbackAction("clear");
         }
 
-        function clearAraiPendingNavigationMarker() {
-            try {
-                sessionStorage.removeItem(ARAI_SEARCH_BRIDGE_NAVIGATION_KEY);
-            } catch {
-                // Ignore private-mode or storage-policy restrictions.
-            }
-        }
-
-        function resetAraiPendingLookupState() {
-            const state = siteSearchBridgeState.arai;
-            state.pendingLookupStartedAt = 0;
-            state.pendingLookupAttempts = 0;
-            state.pendingLookupMissingLogged = false;
-        }
-
-        function retryAraiPendingLookup(reason, currentMode) {
-            const marker = getAraiPendingNavigationMarker();
-            if (!marker || marker.targetMode !== currentMode) return;
-
-            const state = siteSearchBridgeState.arai;
-            if (state.pendingRetryTimer) return;
-
-            if (!state.pendingLookupStartedAt) state.pendingLookupStartedAt = Date.now();
-            state.pendingLookupAttempts += 1;
-
-            const elapsed = Date.now() - state.pendingLookupStartedAt;
-            if (!state.pendingLookupMissingLogged) {
-                state.pendingLookupMissingLogged = true;
-                recordAraiSearchBridgeLog("pending確認待機", {
-                    reason,
-                    targetMode: currentMode,
-                    pendingId: marker.id,
-                    elapsed
-                });
-            }
-
-            if (elapsed >= ARAI_PENDING_LOOKUP_MAX_AGE_MS) {
-                clearAraiPendingNavigationMarker();
-                recordAraiSearchBridgeLog("失敗停止", {
-                    reason: "Araiの保存条件を遷移先で取得できませんでした",
-                    targetMode: currentMode,
-                    pendingId: marker.id,
-                    attempts: state.pendingLookupAttempts,
-                    elapsed
-                });
-                return;
-            }
-
-            scheduleSiteSearchBridgePendingRetry(getAraiSearchBridgeAdapter(), 400);
-        }
-
-        function handleAraiPendingFound(pending, currentMode) {
-            const state = siteSearchBridgeState.arai;
-            const attempts = state.pendingLookupAttempts;
-            if (attempts > 0) {
+        function handleAraiPendingFound(pending, currentMode, source = {}) {
+            if (source.fromFallback) {
                 recordAraiSearchBridgeLog("pending取得", {
                     targetMode: currentMode,
                     pendingId: getAraiSearchBridgePendingId(pending),
-                    attempts
+                    source: source.fromFallback ? "main_world_fallback" : "chrome_storage"
                 });
             }
-            clearAraiPendingNavigationMarker();
-            resetAraiPendingLookupState();
         }
 
         function ensureAraiSearchBridgeFlow(pending) {
@@ -2350,8 +2310,7 @@
 
         async function clearAraiSearchBridgePending(reason = "manual") {
             resetAraiSearchBridgeFlow();
-            clearAraiPendingNavigationMarker();
-            resetAraiPendingLookupState();
+            clearAraiPendingFallback();
             await chrome.storage.local.remove([ARAI_SEARCH_BRIDGE_PENDING_KEY, ARAI_SEARCH_BRIDGE_RUN_KEY]);
             if (siteSearchBridgeState.arai.pendingRetryTimer) {
                 clearTimeout(siteSearchBridgeState.arai.pendingRetryTimer);
@@ -3446,7 +3405,7 @@
                 storageKey: ARAI_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: ARAI_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "arai-search-bridge-ui",
-                buildId: "arai-pending-retry-20260710",
+                buildId: "arai-main-fallback-20260710",
                 position: { right: "12px", top: "132px" },
                 launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.arai,
@@ -3471,25 +3430,23 @@
                 },
                 afterPendingCreated: async (pending, targetMode) => {
                     resetAraiSearchBridgeFlow(pending);
-                    resetAraiPendingLookupState();
                     recordAraiSearchBridgeLog("pending作成", {
                         pendingId: pending.id,
                         targetMode,
                         sourceMode: pending.condition?.sourceMode || ""
                     });
                 },
-                beforePendingNavigate: setAraiPendingNavigationMarker,
+                beforePendingNavigate: setAraiPendingFallback,
                 afterPendingCleared: async (reason, pending) => {
                     resetAraiSearchBridgeFlow();
-                    clearAraiPendingNavigationMarker();
-                    resetAraiPendingLookupState();
+                    clearAraiPendingFallback();
                     recordAraiSearchBridgeLog("保留クリア", {
                         reason,
                         pendingId: pending?.id || ""
                     });
                 },
-                onPendingStorageUnavailable: currentMode => retryAraiPendingLookup("storage_unavailable", currentMode),
-                onPendingMissing: currentMode => retryAraiPendingLookup("pending_missing", currentMode),
+                getPendingFallback: getAraiPendingFallback,
+                clearPendingFallback: clearAraiPendingFallback,
                 onPendingFound: handleAraiPendingFound,
                 beforePendingRestore: handleAraiPendingBeforeRestore,
                 beforeRestore: activateAraiSearchBridgeTargetTab,

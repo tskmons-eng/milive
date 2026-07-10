@@ -8,6 +8,63 @@
         const ARAI_KAIJO_DIAGNOSTIC_ATTR = "data-mlive-arai-kaijo-diagnostic";
         const ARAI_KAIJO_PROBE_ONLY_ATTR = "data-mlive-arai-kaijo-probe-only";
         const ARAI_KAIJO_ACTION_EVENT = "mlive-linkifier:arai-kaijo-action";
+        const ARAI_PENDING_FALLBACK_ATTR = "data-mlive-arai-pending-fallback";
+        const ARAI_PENDING_FALLBACK_COMMAND_ATTR = "data-mlive-arai-pending-fallback-command";
+        const ARAI_PENDING_FALLBACK_RESULT_ATTR = "data-mlive-arai-pending-fallback-result";
+        const ARAI_PENDING_FALLBACK_STORAGE_KEY = "mliveLinkifierAraiSearchBridgePendingFallback";
+        const ARAI_PENDING_FALLBACK_EVENT = "mlive-linkifier:arai-pending-fallback";
+
+        const publishAraiPendingFallback = () => {
+            const root = document.documentElement;
+            if (!root) return false;
+
+            try {
+                const raw = window.sessionStorage.getItem(ARAI_PENDING_FALLBACK_STORAGE_KEY);
+                if (raw) {
+                    root.setAttribute(ARAI_PENDING_FALLBACK_ATTR, raw);
+                } else {
+                    root.removeAttribute(ARAI_PENDING_FALLBACK_ATTR);
+                }
+                root.setAttribute(ARAI_PENDING_FALLBACK_RESULT_ATTR, "1");
+                return true;
+            } catch (error) {
+                root.setAttribute(ARAI_PENDING_FALLBACK_RESULT_ATTR, "0");
+                console.warn("MLive Linkifier: Arai pending fallback failed", error);
+                return false;
+            }
+        };
+
+        const handleAraiPendingFallback = () => {
+            const root = document.documentElement;
+            if (!root) return;
+
+            const command = root.getAttribute(ARAI_PENDING_FALLBACK_COMMAND_ATTR) || "read";
+            try {
+                if (command === "save") {
+                    const raw = root.getAttribute(ARAI_PENDING_FALLBACK_ATTR) || "";
+                    const pending = JSON.parse(raw);
+                    if (!pending || typeof pending !== "object") throw new Error("pending payload is invalid");
+                    window.sessionStorage.setItem(ARAI_PENDING_FALLBACK_STORAGE_KEY, raw);
+                } else if (command === "clear") {
+                    window.sessionStorage.removeItem(ARAI_PENDING_FALLBACK_STORAGE_KEY);
+                }
+            } catch (error) {
+                root.setAttribute(ARAI_PENDING_FALLBACK_RESULT_ATTR, "0");
+                console.warn("MLive Linkifier: Arai pending fallback command failed", error);
+                return;
+            } finally {
+                root.removeAttribute(ARAI_PENDING_FALLBACK_COMMAND_ATTR);
+            }
+
+            publishAraiPendingFallback();
+        };
+
+        window.addEventListener(ARAI_PENDING_FALLBACK_EVENT, handleAraiPendingFallback);
+        if (document.documentElement) {
+            publishAraiPendingFallback();
+        } else {
+            document.addEventListener("DOMContentLoaded", publishAraiPendingFallback, { once: true });
+        }
 
         const isVisible = (el) => {
             if (!el) return false;
