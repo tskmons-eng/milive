@@ -278,6 +278,7 @@
         const ARAI_NAME_DIAGNOSTIC_ALERT_ATTR = "data-mlive-arai-name-diagnostic-alert";
         const ARAI_NAME_DIAGNOSTIC_SUMMARY_ATTR = "data-mlive-arai-name-diagnostic-summary";
         const JU_SELECTION_DIAGNOSTIC_SUMMARY_ATTR = "data-mlive-ju-selection-diagnostic-summary";
+        const JU_SELECTION_DIAGNOSTIC_TRACE_ATTR = "data-mlive-ju-selection-diagnostic-trace";
         const ARAI_NAME_DIAGNOSTIC_EVENT = "mlive-linkifier:arai-name-diagnostic";
         const ARAI_NAME_DIAGNOSTIC_ALERT_EVENT = "mlive-linkifier:arai-name-diagnostic-alert";
         const ARAI_SEARCH_BRIDGE_LOG_LIMIT = 80;
@@ -4341,14 +4342,52 @@
             };
         }
 
+        function getJuSelectionDiagnosticTrace(record = juSelectionDiagnosticRecord) {
+            const steps = Array.isArray(record?.steps) ? record.steps : [];
+            return {
+                version: record?.version || 1,
+                status: record?.status || "empty",
+                startedAt: record?.startedAt || 0,
+                updatedAt: record?.updatedAt || 0,
+                sourceMode: record?.sourceMode || "",
+                sourceUrl: record?.sourceUrl || "",
+                steps: steps.map(step => ({
+                    sequence: step?.sequence || 0,
+                    at: step?.at || 0,
+                    kind: step?.kind || "",
+                    target: step?.detail?.target || null,
+                    snapshot: {
+                        url: step?.snapshot?.url || "",
+                        mode: step?.snapshot?.mode || "",
+                        formId: step?.snapshot?.formId || "",
+                        controls: (step?.snapshot?.controls || [])
+                            .map(control => ({
+                                tag: control?.tag || "",
+                                id: control?.id || "",
+                                type: control?.type || "",
+                                value: control?.value || "",
+                                checked: control?.checked ?? null,
+                                selectedTexts: Array.isArray(control?.selectedTexts) ? control.selectedTexts : []
+                            }))
+                            .filter(control => control.id),
+                        overlays: step?.snapshot?.overlays || [],
+                        actionButtons: step?.snapshot?.actionButtons || [],
+                        alerts: step?.snapshot?.alerts || []
+                    }
+                }))
+            };
+        }
+
         function publishJuSelectionDiagnosticSummary(record = juSelectionDiagnosticRecord) {
             const root = document.documentElement;
             if (!root) return;
 
             try {
                 root.setAttribute(JU_SELECTION_DIAGNOSTIC_SUMMARY_ATTR, JSON.stringify(getJuSelectionDiagnosticSummary(record)));
+                root.setAttribute(JU_SELECTION_DIAGNOSTIC_TRACE_ATTR, JSON.stringify(getJuSelectionDiagnosticTrace(record)));
             } catch {
                 root.removeAttribute(JU_SELECTION_DIAGNOSTIC_SUMMARY_ATTR);
+                root.removeAttribute(JU_SELECTION_DIAGNOSTIC_TRACE_ATTR);
             }
         }
 
@@ -4521,9 +4560,12 @@
 
             try {
                 const record = await getJuSelectionDiagnosticRecord();
-                if (record?.status !== "recording" || !isJuSearchBridgeMode(getJuSearchBridgeMode())) return;
+                if (!record) return;
 
                 juSelectionDiagnosticRecord = record;
+                publishJuSelectionDiagnosticSummary(record);
+                if (record.status !== "recording" || !isJuSearchBridgeMode(getJuSearchBridgeMode())) return;
+
                 juSelectionDiagnosticSnapshotSignature = "";
                 installJuSelectionDiagnosticListeners();
                 recordJuSelectionDiagnosticStep("page_loaded");
