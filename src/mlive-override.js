@@ -30,6 +30,9 @@
                     el.name === "kaijo4w";
             });
             const selectedInputs = venueInputs.filter(el => el.checked);
+            const historyInput = document.getElementById("history_check");
+            const patternInput = document.querySelector("input[name='pattern']");
+            const isActiveTab = (id) => /\b(active|on|selected|current)\b/i.test(String(document.getElementById(id)?.className || ""));
 
             return {
                 href: location.href,
@@ -47,10 +50,19 @@
                 hasConditionButton: !!(document.getElementById("btAppointed") || document.getElementById("btSearch")),
                 hasBtAppointed: !!document.getElementById("btAppointed"),
                 hasBtSearch: !!document.getElementById("btSearch"),
+                hasHistoryCheck: !!historyInput,
+                historyCheckVisible: isVisible(historyInput),
+                hasPatternInput: !!patternInput,
+                patternInputVisible: isVisible(patternInput),
+                hasNameInput: isVisible(historyInput) || isVisible(patternInput),
                 hasMarketNameTab: !!document.getElementById("johoTab1"),
                 hasMarketConditionTab: !!document.getElementById("johoTab3"),
                 hasListingNameTab: !!document.getElementById("tbSearchTab1"),
                 hasListingConditionTab: !!document.getElementById("tbSearchTab5"),
+                marketNameTabActive: isActiveTab("johoTab1"),
+                marketConditionTabActive: isActiveTab("johoTab3"),
+                listingNameTabActive: isActiveTab("tbSearchTab1"),
+                listingConditionTabActive: isActiveTab("tbSearchTab5"),
                 hasJquery: typeof window.jQuery === "function",
                 toggleCarClass: document.getElementById("toggle_car")?.className || "",
                 ckAll4wClass: document.getElementById("CKALL4W")?.className || "",
@@ -252,9 +264,19 @@
 
         const runAraiNextAttempts = (searchKind = "condition") => {
             const attempts = [];
-            const hasConditionForm = (_before, after) => !!after.hasConditionButton;
+            const hasTargetForm = (_before, after) => searchKind === "name"
+                ? !!after.hasNameInput
+                : !!after.hasBtAppointed || (!!after.hasConditionButton && !after.hasNameInput);
+            const refreshTargetMode = () => {
+                if (searchKind === "name") {
+                    window.setTimeout(() => activateAraiNameMode(), 350);
+                }
+            };
             const tryAttempt = (label, fn) => {
-                const attempt = runAraiAttempt("next_auto", label, fn, hasConditionForm);
+                const attempt = runAraiAttempt("next_auto", label, () => {
+                    fn();
+                    refreshTargetMode();
+                }, hasTargetForm);
                 attempts.push(attempt);
                 return attempt.ok;
             };
