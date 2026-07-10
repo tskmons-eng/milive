@@ -267,7 +267,7 @@
         const ARAI_SEARCH_BRIDGE_LOG_KEY = "araiSearchBridgeDebugLog";
         const ARAI_SEARCH_BRIDGE_RUN_KEY = "araiSearchBridgeRunState";
         const ARAI_NAME_DIAGNOSTIC_KEY = "araiNameCascadeDiagnostic";
-        const JU_SELECTION_DIAGNOSTIC_KEY = "juSelectionCascadeDiagnostic";
+        const JU_SELECTION_CASCADE_SESSION_KEY = "mliveLinkifierJuSelectionCascade";
         const ARAI_PENDING_FALLBACK_ATTR = "data-mlive-arai-pending-fallback";
         const ARAI_PENDING_FALLBACK_COMMAND_ATTR = "data-mlive-arai-pending-fallback-command";
         const ARAI_PENDING_FALLBACK_RESULT_ATTR = "data-mlive-arai-pending-fallback-result";
@@ -277,13 +277,11 @@
         const ARAI_NAME_DIAGNOSTIC_RESULT_ATTR = "data-mlive-arai-name-diagnostic-result";
         const ARAI_NAME_DIAGNOSTIC_ALERT_ATTR = "data-mlive-arai-name-diagnostic-alert";
         const ARAI_NAME_DIAGNOSTIC_SUMMARY_ATTR = "data-mlive-arai-name-diagnostic-summary";
-        const JU_SELECTION_DIAGNOSTIC_SUMMARY_ATTR = "data-mlive-ju-selection-diagnostic-summary";
-        const JU_SELECTION_DIAGNOSTIC_TRACE_ATTR = "data-mlive-ju-selection-diagnostic-trace";
         const ARAI_NAME_DIAGNOSTIC_EVENT = "mlive-linkifier:arai-name-diagnostic";
         const ARAI_NAME_DIAGNOSTIC_ALERT_EVENT = "mlive-linkifier:arai-name-diagnostic-alert";
         const ARAI_SEARCH_BRIDGE_LOG_LIMIT = 80;
         const ARAI_NAME_DIAGNOSTIC_STEP_LIMIT = 60;
-        const JU_SELECTION_DIAGNOSTIC_STEP_LIMIT = 80;
+        const JU_SELECTION_CASCADE_MAX_WAIT_MS = 12000;
         const SEARCH_BRIDGE_PENDING_MAX_AGE_MS = 10 * 60 * 1000;
         const JU_SEARCH_BRIDGE_SLOTS_KEY = "juSearchBridgeSlots";
         const JU_SEARCH_BRIDGE_PENDING_KEY = "juSearchBridgePending";
@@ -1318,17 +1316,57 @@
             return normalizedSteps.length ? { version: 1, steps: normalizedSteps } : undefined;
         }
 
+        function normalizeJuSelectionCascadeText(value) {
+            return normalizeSearchBridgeText(value)
+                .replace(/[\uFF08(]\s*[\d,]+\s*[\uFF09)]\s*$/, "")
+                .slice(0, 120);
+        }
+
+        function normalizeJuSelectionCascade(value) {
+            const cars = Array.isArray(value?.cars) ? value.cars : [];
+            const seen = new Set();
+            const normalizedCars = cars
+                .map(car => {
+                    const maker = normalizeJuSelectionCascadeText(car?.maker);
+                    const name = normalizeJuSelectionCascadeText(car?.car || car?.name);
+                    const grades = Array.from(new Set((Array.isArray(car?.grades) ? car.grades : [])
+                        .map(normalizeJuSelectionCascadeText)
+                        .filter(Boolean)))
+                        .slice(0, 12);
+
+                    return { maker, car: name, grades };
+                })
+                .filter(car => car.maker && car.car)
+                .filter(car => {
+                    const key = `${car.maker}\u0000${car.car}`;
+                    if (seen.has(key)) return false;
+                    seen.add(key);
+                    return true;
+                })
+                .slice(0, 8);
+            const blocked = value?.blocked === true;
+
+            if (!blocked && normalizedCars.length === 0) return undefined;
+            return {
+                version: 1,
+                blocked,
+                cars: normalizedCars
+            };
+        }
+
         function normalizeSiteSearchBridgeCondition(condition) {
             if (!condition || !Array.isArray(condition.fields)) return null;
 
             const savedAt = Number(condition.savedAt || Date.now());
             const araiNameCascade = normalizeAraiNameCascade(condition.araiNameCascade);
+            const juSelectionCascade = normalizeJuSelectionCascade(condition.juSelectionCascade);
             return {
                 version: MLIVE_SEARCH_BRIDGE_VERSION,
                 sourceMode: normalizeSiteSearchBridgeMode(condition.sourceMode),
                 araiSearchKind: normalizeSiteSearchBridgeKind(condition.araiSearchKind || condition.searchKind),
                 fields: condition.fields.filter(Boolean),
                 araiNameCascade,
+                juSelectionCascade,
                 summary: normalizeSearchBridgeSummary(condition.summary),
                 savedAt: Number.isFinite(savedAt) ? savedAt : Date.now(),
                 sourceUrl: condition.sourceUrl || ""
@@ -2115,12 +2153,8 @@
         let araiNameDiagnosticSnapshotSignature = "";
         let araiNameDiagnosticAlertValue = "";
         let araiNameDiagnosticWriteQueue = Promise.resolve();
-        let juSelectionDiagnosticRecord = null;
-        let juSelectionDiagnosticObserver = null;
-        let juSelectionDiagnosticMutationTimer = null;
-        let juSelectionDiagnosticSnapshotSignature = "";
-        let juSelectionDiagnosticWriteQueue = Promise.resolve();
-        let juSelectionDiagnosticInitialized = false;
+        let juSelectionCascadeCaptureInstalled = false;
+        let juSelectionCascadeDraft = null;
 
         function getAraiNameDiagnosticTarget(target) {
             const element = target?.nodeType === 1 ? target : target?.parentElement;
@@ -4221,386 +4255,344 @@
 
         // ===== JU 検索条件ブリッジ =====
 
-        function getJuSelectionDiagnosticRelevantSelector() {
-            return "#b3-Form,#b4-Form,#b5-Form,[id^='b3-'],[id^='b4-'],[id^='b5-'],dialog,[role='dialog'],[aria-modal='true'],[class*='modal'],[class*='popup'],[class*='dialog']";
-        }
-
-        function getJuSelectionDiagnosticOverlaySelector() {
-            return "dialog,[role='dialog'],[aria-modal='true'],[class*='modal'],[class*='popup'],[class*='dialog']";
-        }
-
-        function isJuSelectionDiagnosticOwnUi(element) {
-            return !!element?.closest?.("#ju-search-bridge-ui");
-        }
-
-        function getJuSelectionDiagnosticTarget(target) {
-            const element = target?.nodeType === 1 ? target : target?.parentElement;
-            if (!element || isJuSelectionDiagnosticOwnUi(element)) return null;
-
-            const control = element.closest("button,a,input,select,textarea,label,li,[role='option'],[role='button']") || element;
-            if (isJuSelectionDiagnosticOwnUi(control)) return null;
-
-            const scope = control.closest(getJuSelectionDiagnosticRelevantSelector());
-            const selectedTexts = control.tagName === "SELECT"
-                ? Array.from(control.selectedOptions || [])
-                    .map(option => normalizeSearchBridgeText(option.textContent || option.value || ""))
-                    .filter(Boolean)
-                    .slice(0, 8)
-                : [];
-
-            return {
-                tag: String(control.tagName || "").toLowerCase(),
-                id: control.id || "",
-                name: control.name || "",
-                type: control.type || "",
-                value: "value" in control ? String(control.value || "").slice(0, 160) : "",
-                checked: "checked" in control ? !!control.checked : null,
-                selectedTexts,
-                text: normalizeSearchBridgeText(control.innerText || control.textContent || "").slice(0, 160),
-                scope: scope?.id || scope?.getAttribute?.("role") || ""
-            };
-        }
-
-        function isJuSelectionDiagnosticRelevantTarget(target) {
-            const element = target?.nodeType === 1 ? target : target?.parentElement;
-            if (!element || isJuSelectionDiagnosticOwnUi(element)) return false;
-
-            return !!element.closest(getJuSelectionDiagnosticRelevantSelector());
-        }
-
-        function getJuSelectionDiagnosticCandidateTexts(root) {
-            if (!root) return [];
-
-            const seen = new Set();
-            return Array.from(root.querySelectorAll("button,a,label,li,[role='option'],[role='button'],input[type='checkbox'],input[type='radio']"))
-                .filter(element => isSearchBridgeElementVisible(element) && !isJuSelectionDiagnosticOwnUi(element))
-                .map(element => normalizeSearchBridgeText(element.innerText || element.textContent || element.value || ""))
-                .filter(text => text && text.length <= 160 && !seen.has(text) && (seen.add(text), true))
-                .slice(0, 20);
-        }
-
-        function getJuSelectionDiagnosticSnapshot() {
-            const controlSelector = "#b3-Form input,#b3-Form select,#b3-Form textarea,#b4-Form input,#b4-Form select,#b4-Form textarea,#b5-Form input,#b5-Form select,#b5-Form textarea";
-            const overlaySelector = getJuSelectionDiagnosticOverlaySelector();
-            const controls = Array.from(document.querySelectorAll(controlSelector))
-                .filter(element => isSearchBridgeElementVisible(element))
-                .map(element => getJuSelectionDiagnosticTarget(element))
-                .filter(Boolean);
-            const overlays = Array.from(document.querySelectorAll(overlaySelector))
-                .filter(element => isSearchBridgeElementVisible(element) && !isJuSelectionDiagnosticOwnUi(element))
-                .filter(element => !element.parentElement?.closest(overlaySelector))
-                .slice(0, 8)
-                .map(element => ({
-                    tag: String(element.tagName || "").toLowerCase(),
-                    id: element.id || "",
-                    className: String(element.className || "").slice(0, 160),
-                    title: normalizeSearchBridgeText(element.querySelector("h1,h2,h3,h4,h5,.title,[data-title]")?.textContent || "").slice(0, 120),
-                    candidates: getJuSelectionDiagnosticCandidateTexts(element)
-                }));
-            const actionButtons = Array.from(document.querySelectorAll("#b3-Form button,#b4-Form button,#b5-Form button"))
-                .filter(element => isSearchBridgeElementVisible(element))
-                .map(element => ({
-                    id: element.id || "",
-                    text: normalizeSearchBridgeText(element.innerText || element.textContent || "").slice(0, 120),
-                    disabled: !!element.disabled
-                }))
-                .filter(button => button.text || button.id)
-                .slice(0, 20);
-            const alerts = Array.from(document.querySelectorAll("[role='alert'],.alert,[class*='alert']"))
-                .filter(element => isSearchBridgeElementVisible(element) && !isJuSelectionDiagnosticOwnUi(element))
-                .map(element => normalizeSearchBridgeText(element.innerText || element.textContent || ""))
-                .filter(Boolean)
-                .slice(0, 8);
-
-            return {
-                url: location.href,
-                mode: getJuSearchBridgeMode(),
-                formId: getJuSearchBridgeForm(getJuSearchBridgeMode())?.id || "",
-                controls,
-                overlays,
-                actionButtons,
-                alerts
-            };
-        }
-
-        function getJuSelectionDiagnosticSnapshotSignature(snapshot = getJuSelectionDiagnosticSnapshot()) {
-            return JSON.stringify(snapshot);
-        }
-
-        function getJuSelectionDiagnosticSummary(record = juSelectionDiagnosticRecord) {
-            const steps = Array.isArray(record?.steps) ? record.steps : [];
-            const last = steps.at(-1) || null;
-            return {
-                version: record?.version || 1,
-                status: record?.status || "empty",
-                startedAt: record?.startedAt || 0,
-                updatedAt: record?.updatedAt || 0,
-                stepCount: steps.length,
-                lastKind: last?.kind || "",
-                lastTarget: last?.detail?.target || null,
-                lastSnapshot: last?.snapshot || null
-            };
-        }
-
-        function getJuSelectionDiagnosticTrace(record = juSelectionDiagnosticRecord) {
-            const steps = Array.isArray(record?.steps) ? record.steps : [];
-            return {
-                version: record?.version || 1,
-                status: record?.status || "empty",
-                startedAt: record?.startedAt || 0,
-                updatedAt: record?.updatedAt || 0,
-                sourceMode: record?.sourceMode || "",
-                sourceUrl: record?.sourceUrl || "",
-                steps: steps.map(step => ({
-                    sequence: step?.sequence || 0,
-                    at: step?.at || 0,
-                    kind: step?.kind || "",
-                    target: step?.detail?.target || null,
-                    snapshot: {
-                        url: step?.snapshot?.url || "",
-                        mode: step?.snapshot?.mode || "",
-                        formId: step?.snapshot?.formId || "",
-                        controls: (step?.snapshot?.controls || [])
-                            .map(control => ({
-                                tag: control?.tag || "",
-                                id: control?.id || "",
-                                type: control?.type || "",
-                                value: control?.value || "",
-                                checked: control?.checked ?? null,
-                                selectedTexts: Array.isArray(control?.selectedTexts) ? control.selectedTexts : []
-                            }))
-                            .filter(control => control.id),
-                        overlays: step?.snapshot?.overlays || [],
-                        actionButtons: step?.snapshot?.actionButtons || [],
-                        alerts: step?.snapshot?.alerts || []
-                    }
-                }))
-            };
-        }
-
-        function publishJuSelectionDiagnosticSummary(record = juSelectionDiagnosticRecord) {
-            const root = document.documentElement;
-            if (!root) return;
+        function getJuSelectionCascadeDraft() {
+            if (juSelectionCascadeDraft) return juSelectionCascadeDraft;
 
             try {
-                root.setAttribute(JU_SELECTION_DIAGNOSTIC_SUMMARY_ATTR, JSON.stringify(getJuSelectionDiagnosticSummary(record)));
-                root.setAttribute(JU_SELECTION_DIAGNOSTIC_TRACE_ATTR, JSON.stringify(getJuSelectionDiagnosticTrace(record)));
+                const raw = sessionStorage.getItem(JU_SELECTION_CASCADE_SESSION_KEY);
+                const stored = raw ? JSON.parse(raw) : null;
+                if (!stored || !Array.isArray(stored.cars)) return null;
+
+                juSelectionCascadeDraft = {
+                    version: 1,
+                    updatedAt: Number(stored.updatedAt || 0),
+                    sourceMode: normalizeSiteSearchBridgeMode(stored.sourceMode),
+                    activeMaker: normalizeJuSelectionCascadeText(stored.activeMaker),
+                    activeCar: normalizeJuSelectionCascadeText(stored.activeCar),
+                    cars: normalizeJuSelectionCascade(stored)?.cars || []
+                };
+                return juSelectionCascadeDraft;
             } catch {
-                root.removeAttribute(JU_SELECTION_DIAGNOSTIC_SUMMARY_ATTR);
-                root.removeAttribute(JU_SELECTION_DIAGNOSTIC_TRACE_ATTR);
+                return null;
             }
         }
 
-        function cloneJuSelectionDiagnosticRecord(record) {
-            return JSON.parse(JSON.stringify(record));
-        }
-
-        function queueJuSelectionDiagnosticWrite(record = juSelectionDiagnosticRecord) {
-            const storage = getSiteSearchBridgeLocalStorage();
-            if (!storage || !record) return Promise.resolve();
-
-            const snapshot = cloneJuSelectionDiagnosticRecord(record);
-            juSelectionDiagnosticWriteQueue = juSelectionDiagnosticWriteQueue
-                .catch(() => undefined)
-                .then(() => storage.set({ [JU_SELECTION_DIAGNOSTIC_KEY]: snapshot }))
-                .catch(error => {
-                    if (!/extension context invalidated/i.test(String(error?.message || error))) {
-                        console.warn("MLive Linkifier: JU selection diagnostic write failed", error);
-                    }
-                });
-            return juSelectionDiagnosticWriteQueue;
-        }
-
-        async function getJuSelectionDiagnosticRecord() {
-            const storage = getSiteSearchBridgeLocalStorage();
-            if (!storage) return null;
-
-            const result = await storage.get(JU_SELECTION_DIAGNOSTIC_KEY);
-            const record = result[JU_SELECTION_DIAGNOSTIC_KEY];
-            return record && typeof record === "object" ? record : null;
-        }
-
-        function recordJuSelectionDiagnosticStep(kind, detail = {}) {
-            const record = juSelectionDiagnosticRecord;
-            if (!record || record.status !== "recording") return;
-
-            const snapshot = getJuSelectionDiagnosticSnapshot();
-            const signature = getJuSelectionDiagnosticSnapshotSignature(snapshot);
-            if (kind === "dom_update" && signature === juSelectionDiagnosticSnapshotSignature) return;
-
-            juSelectionDiagnosticSnapshotSignature = signature;
-            record.steps.push({
-                sequence: Number(record.nextSequence || 1),
-                at: Date.now(),
-                kind,
-                detail,
-                snapshot
-            });
-            record.nextSequence = Number(record.nextSequence || 1) + 1;
-            if (record.steps.length > JU_SELECTION_DIAGNOSTIC_STEP_LIMIT) {
-                record.steps.splice(0, record.steps.length - JU_SELECTION_DIAGNOSTIC_STEP_LIMIT);
-            }
-            record.updatedAt = Date.now();
-            publishJuSelectionDiagnosticSummary(record);
-            void queueJuSelectionDiagnosticWrite(record);
-        }
-
-        function isJuSelectionDiagnosticMutationRelevant(mutations) {
-            const selector = getJuSelectionDiagnosticRelevantSelector();
-
-            return mutations.some(mutation => {
-                const target = mutation.target?.nodeType === 1 ? mutation.target : mutation.target?.parentElement;
-                if (target?.closest?.(selector) && !isJuSelectionDiagnosticOwnUi(target)) return true;
-
-                return Array.from(mutation.addedNodes || []).some(node => {
-                    const element = node?.nodeType === 1 ? node : node?.parentElement;
-                    if (!element || isJuSelectionDiagnosticOwnUi(element)) return false;
-                    return !!(element.matches?.(selector) || element.querySelector?.(selector));
-                });
-            });
-        }
-
-        function scheduleJuSelectionDiagnosticMutationRecord() {
-            if (juSelectionDiagnosticMutationTimer) clearTimeout(juSelectionDiagnosticMutationTimer);
-            juSelectionDiagnosticMutationTimer = setTimeout(() => {
-                juSelectionDiagnosticMutationTimer = null;
-                recordJuSelectionDiagnosticStep("dom_update");
-            }, 120);
-        }
-
-        function handleJuSelectionDiagnosticClick(event) {
-            if (!event.isTrusted || !isJuSelectionDiagnosticRelevantTarget(event.target)) return;
-            recordJuSelectionDiagnosticStep("user_click", { target: getJuSelectionDiagnosticTarget(event.target) });
-        }
-
-        function handleJuSelectionDiagnosticChange(event) {
-            if (!event.isTrusted || !isJuSelectionDiagnosticRelevantTarget(event.target)) return;
-            recordJuSelectionDiagnosticStep("user_change", { target: getJuSelectionDiagnosticTarget(event.target) });
-        }
-
-        function handleJuSelectionDiagnosticInput(event) {
-            if (!event.isTrusted || !isJuSelectionDiagnosticRelevantTarget(event.target)) return;
-            recordJuSelectionDiagnosticStep("user_input", { target: getJuSelectionDiagnosticTarget(event.target) });
-        }
-
-        function installJuSelectionDiagnosticListeners() {
-            document.addEventListener("click", handleJuSelectionDiagnosticClick, true);
-            document.addEventListener("change", handleJuSelectionDiagnosticChange, true);
-            document.addEventListener("input", handleJuSelectionDiagnosticInput, true);
-
-            juSelectionDiagnosticObserver = new MutationObserver(mutations => {
-                if (isJuSelectionDiagnosticMutationRelevant(mutations)) scheduleJuSelectionDiagnosticMutationRecord();
-            });
-            juSelectionDiagnosticObserver.observe(document.documentElement, {
-                subtree: true,
-                childList: true,
-                attributes: true,
-                attributeFilter: ["class", "style", "value", "checked", "selected", "aria-selected", "aria-checked", "aria-expanded"]
-            });
-        }
-
-        function removeJuSelectionDiagnosticListeners() {
-            document.removeEventListener("click", handleJuSelectionDiagnosticClick, true);
-            document.removeEventListener("change", handleJuSelectionDiagnosticChange, true);
-            document.removeEventListener("input", handleJuSelectionDiagnosticInput, true);
-            juSelectionDiagnosticObserver?.disconnect();
-            juSelectionDiagnosticObserver = null;
-            if (juSelectionDiagnosticMutationTimer) clearTimeout(juSelectionDiagnosticMutationTimer);
-            juSelectionDiagnosticMutationTimer = null;
-        }
-
-        async function startJuSelectionDiagnostic() {
-            const mode = getJuSearchBridgeMode();
-            if (!isJuSearchBridgeMode(mode) || !getJuSearchBridgeForm(mode)) {
-                showSiteSearchBridgeNotice(getJuSearchBridgeAdapter(), "JUの検索画面で開始してください", "error");
-                return false;
-            }
-            if (!getSiteSearchBridgeLocalStorage()) {
-                showSiteSearchBridgeNotice(getJuSearchBridgeAdapter(), "拡張更新後の古いページです。ページを再読み込みしてください", "error");
-                return false;
-            }
-
-            removeJuSelectionDiagnosticListeners();
-            const now = Date.now();
-            juSelectionDiagnosticSnapshotSignature = "";
-            juSelectionDiagnosticRecord = {
+        function saveJuSelectionCascadeDraft(draft) {
+            const normalized = normalizeJuSelectionCascade(draft);
+            const next = {
                 version: 1,
-                status: "recording",
-                startedAt: now,
-                updatedAt: now,
-                sourceMode: mode,
-                sourceUrl: location.href,
-                nextSequence: 1,
-                steps: []
+                updatedAt: Date.now(),
+                sourceMode: getJuSearchBridgeMode(),
+                activeMaker: normalizeJuSelectionCascadeText(draft?.activeMaker),
+                activeCar: normalizeJuSelectionCascadeText(draft?.activeCar),
+                cars: normalized?.cars || []
             };
-            juSelectionDiagnosticInitialized = true;
-            installJuSelectionDiagnosticListeners();
-            recordJuSelectionDiagnosticStep("recording_started");
-            await queueJuSelectionDiagnosticWrite(juSelectionDiagnosticRecord);
-            return true;
-        }
 
-        async function stopJuSelectionDiagnostic() {
-            const record = juSelectionDiagnosticRecord || await getJuSelectionDiagnosticRecord();
-            if (!record) return null;
-
-            juSelectionDiagnosticRecord = record;
-            recordJuSelectionDiagnosticStep("recording_finished");
-            record.status = "stopped";
-            record.updatedAt = Date.now();
-            removeJuSelectionDiagnosticListeners();
-            publishJuSelectionDiagnosticSummary(record);
-            await queueJuSelectionDiagnosticWrite(record);
-            return record;
-        }
-
-        async function initializeJuSelectionDiagnostic() {
-            if (juSelectionDiagnosticInitialized) return;
-            juSelectionDiagnosticInitialized = true;
-
+            juSelectionCascadeDraft = next;
             try {
-                const record = await getJuSelectionDiagnosticRecord();
-                if (!record) return;
+                sessionStorage.setItem(JU_SELECTION_CASCADE_SESSION_KEY, JSON.stringify(next));
+            } catch {
+                // The live page remains usable even when session storage is unavailable.
+            }
+            return next;
+        }
 
-                juSelectionDiagnosticRecord = record;
-                publishJuSelectionDiagnosticSummary(record);
-                if (record.status !== "recording" || !isJuSearchBridgeMode(getJuSearchBridgeMode())) return;
-
-                juSelectionDiagnosticSnapshotSignature = "";
-                installJuSelectionDiagnosticListeners();
-                recordJuSelectionDiagnosticStep("page_loaded");
-            } catch (error) {
-                if (!/extension context invalidated/i.test(String(error?.message || error))) {
-                    console.warn("MLive Linkifier: JU selection diagnostic startup failed", error);
-                }
+        function clearJuSelectionCascadeDraft() {
+            juSelectionCascadeDraft = null;
+            try {
+                sessionStorage.removeItem(JU_SELECTION_CASCADE_SESSION_KEY);
+            } catch {
+                // Ignore a storage failure because this only clears an optional capture draft.
             }
         }
 
-        function createJuSelectionDiagnosticPanelAction(wrap, adapter) {
-            const button = createSiteSearchBridgeButton("選択記録", async () => {
-                button.disabled = true;
-                try {
-                    const record = juSelectionDiagnosticRecord || await getJuSelectionDiagnosticRecord();
-                    if (record?.status === "recording") {
-                        const stopped = await stopJuSelectionDiagnostic();
-                        showSiteSearchBridgeNotice(adapter, `JU選択記録を終了しました (${stopped?.steps?.length || 0}件)`);
-                    } else if (await startJuSelectionDiagnostic()) {
-                        showSiteSearchBridgeNotice(adapter, "JU選択記録を開始しました");
-                    }
-                    await renderSiteSearchBridgePanel(wrap, adapter);
-                } finally {
-                    button.disabled = false;
-                }
-            });
+        function getJuSelectionCascadeInputLabel(input) {
+            if (!input) return "";
 
-            void getJuSelectionDiagnosticRecord()
-                .then(record => {
-                    const isRecording = record?.status === "recording";
-                    button.textContent = isRecording ? "記録終了" : "選択記録";
-                    button.title = isRecording ? "JUの選択記録を終了" : "JUの選択記録を開始";
-                })
-                .catch(() => undefined);
-            return button;
+            const label = input.labels?.[0] ||
+                (input.id ? document.querySelector(`label[for="${CSS.escape(input.id)}"]`) : null) ||
+                input.closest("label,li,div");
+            return normalizeJuSelectionCascadeText(label?.textContent || input.getAttribute("aria-label") || input.value || "");
+        }
+
+        function getJuSelectionCascadeMakerLabel(element) {
+            const content = element?.querySelector?.("[id$='-b4-Content']") || element;
+            return normalizeJuSelectionCascadeText(content?.textContent || "");
+        }
+
+        function updateJuSelectionCascadeDraft(update) {
+            const existing = getJuSelectionCascadeDraft();
+            const draft = {
+                version: 1,
+                updatedAt: Date.now(),
+                sourceMode: getJuSearchBridgeMode(),
+                activeMaker: existing?.activeMaker || "",
+                activeCar: existing?.activeCar || "",
+                cars: Array.isArray(existing?.cars)
+                    ? existing.cars.map(car => ({ ...car, grades: [...(car.grades || [])] }))
+                    : []
+            };
+            update(draft);
+            return saveJuSelectionCascadeDraft(draft);
+        }
+
+        function captureJuSelectionCascadeMaker(target) {
+            const element = target?.nodeType === 1 ? target : target?.parentElement;
+            const makerItem = element?.closest?.(".junaviweb-popup-maker-list-container");
+            if (!makerItem || !makerItem.closest(".popup-backdrop")) return;
+
+            const maker = getJuSelectionCascadeMakerLabel(makerItem);
+            if (!maker) return;
+
+            updateJuSelectionCascadeDraft(draft => {
+                if (draft.activeMaker !== maker) {
+                    draft.cars = [];
+                }
+                draft.activeMaker = maker;
+                draft.activeCar = "";
+            });
+        }
+
+        function captureJuSelectionCascadeInput(input) {
+            const id = String(input?.id || "");
+            if (!/^(?:b3|b5)-/.test(id) || !input.closest(".popup-backdrop")) return;
+
+            const isCar = /-CarNameCheckbox$/i.test(id);
+            const isGrade = /-Checkbox3$/i.test(id);
+            if (!isCar && !isGrade) return;
+
+            const value = getJuSelectionCascadeInputLabel(input);
+            if (!value) return;
+
+            updateJuSelectionCascadeDraft(draft => {
+                if (isCar) {
+                    const maker = normalizeJuSelectionCascadeText(draft.activeMaker);
+                    if (!maker) return;
+
+                    const index = draft.cars.findIndex(car => car.maker === maker && car.car === value);
+                    if (input.checked && index < 0) {
+                        draft.cars.push({ maker, car: value, grades: [] });
+                    } else if (!input.checked && index >= 0) {
+                        draft.cars.splice(index, 1);
+                    }
+                    draft.activeCar = input.checked ? value : "";
+                    return;
+                }
+
+                const maker = normalizeJuSelectionCascadeText(draft.activeMaker);
+                const car = normalizeJuSelectionCascadeText(draft.activeCar) || draft.cars.at(-1)?.car || "";
+                const selectedCar = draft.cars.find(item => item.maker === maker && item.car === car);
+                if (!selectedCar) return;
+
+                const grades = Array.isArray(selectedCar.grades) ? selectedCar.grades : (selectedCar.grades = []);
+                const index = grades.indexOf(value);
+                if (input.checked && index < 0) grades.push(value);
+                if (!input.checked && index >= 0) grades.splice(index, 1);
+            });
+        }
+
+        function installJuSearchBridgeSelectionCapture() {
+            if (juSelectionCascadeCaptureInstalled) return;
+            juSelectionCascadeCaptureInstalled = true;
+
+            document.addEventListener("click", event => {
+                if (!event.isTrusted) return;
+
+                const element = event.target?.nodeType === 1 ? event.target : event.target?.parentElement;
+                const control = element?.closest?.("button,input[type='button'],input[type='submit'],a");
+                const text = normalizeSearchBridgeText(control?.textContent || control?.value || "");
+                if (control && !control.closest(".popup-backdrop") && /(?:条件.*(?:クリア|解除)|リセット)/.test(text)) {
+                    clearJuSelectionCascadeDraft();
+                    return;
+                }
+
+                captureJuSelectionCascadeMaker(event.target);
+            }, true);
+
+            document.addEventListener("change", event => {
+                if (!event.isTrusted) return;
+                const input = event.target?.closest?.("input");
+                if (input) captureJuSelectionCascadeInput(input);
+            }, true);
+        }
+
+        function getJuSelectionCascadeWidgetValue(element, label) {
+            let value = normalizeSearchBridgeText(element?.textContent || "");
+            if (value.startsWith(label)) value = value.slice(label.length).trim();
+            if (!value || /^(?:選択|未選択|指定なし|なし|選択してください)/.test(value)) return "";
+            return normalizeJuSelectionCascadeText(value);
+        }
+
+        function getJuSelectionCascadeVisibleSelection(form) {
+            const prefix = getJuSearchBridgeTargetPrefix(getJuSearchBridgeMode());
+            return {
+                car: getJuSelectionCascadeWidgetValue(
+                    document.getElementById(`${prefix}Maker_CarName`) || form?.querySelector?.("[id$='-Maker_CarName']"),
+                    "メーカー・車名"
+                ),
+                grade: getJuSelectionCascadeWidgetValue(
+                    document.getElementById(`${prefix}Katashiki_Grade`) || form?.querySelector?.("[id$='-Katashiki_Grade']"),
+                    "型式・グレード"
+                )
+            };
+        }
+
+        function getJuSelectionCascadeForSaving(form) {
+            const draft = getJuSelectionCascadeDraft();
+            const cascade = normalizeJuSelectionCascade(draft);
+            const visible = getJuSelectionCascadeVisibleSelection(form);
+
+            if (visible.car || visible.grade) {
+                const selectedCar = cascade?.cars?.find(car => car.car === visible.car) || null;
+                const gradeMatches = !visible.grade || !!selectedCar?.grades?.includes(visible.grade);
+                if (!selectedCar || !gradeMatches) {
+                    return { version: 1, blocked: true, cars: [] };
+                }
+                return cascade;
+            }
+
+            if (isJuSearchBridgeSearchPage()) return undefined;
+
+            const isRecent = Number(draft?.updatedAt || 0) > Date.now() - 2 * 60 * 60 * 1000;
+            return isRecent && draft?.sourceMode === getJuSearchBridgeMode() ? cascade : undefined;
+        }
+
+        function buildJuSearchBridgeConditionSummary(fields, cascade) {
+            const selections = [];
+            if (cascade?.blocked) {
+                selections.push("車名選択:再保存が必要");
+            } else {
+                for (const car of cascade?.cars || []) {
+                    selections.push(`${car.maker} ${car.car}`);
+                    if (car.grades?.length) selections.push(`型式:${car.grades.join("/")}`);
+                }
+            }
+
+            return normalizeSearchBridgeSummary([
+                ...selections,
+                ...buildSiteSearchBridgeConditionSummary(fields)
+            ]);
+        }
+
+        function getJuSelectionCascadePopup() {
+            return Array.from(document.querySelectorAll(".popup-backdrop"))
+                .find(element => isSearchBridgeElementVisible(element)) || null;
+        }
+
+        function waitForJuSelectionCascadeValue(read, timeoutMs = JU_SELECTION_CASCADE_MAX_WAIT_MS) {
+            return new Promise(resolve => {
+                const deadline = Date.now() + Math.max(0, timeoutMs);
+                const check = () => {
+                    let value = null;
+                    try {
+                        value = read();
+                    } catch {
+                        value = null;
+                    }
+                    if (value) {
+                        resolve(value);
+                        return;
+                    }
+                    if (Date.now() >= deadline) {
+                        resolve(null);
+                        return;
+                    }
+                    setTimeout(check, 120);
+                };
+                check();
+            });
+        }
+
+        function getJuSelectionCascadeCheckboxes(popup, suffix) {
+            return Array.from(popup?.querySelectorAll?.(`input[id$='-${suffix}']`) || [])
+                .filter(input => !input.disabled);
+        }
+
+        function findJuSelectionCascadeCheckbox(popup, suffix, value) {
+            const expected = normalizeJuSelectionCascadeText(value);
+            const matches = getJuSelectionCascadeCheckboxes(popup, suffix)
+                .filter(input => getJuSelectionCascadeInputLabel(input) === expected);
+            return matches.length === 1 ? matches[0] : null;
+        }
+
+        function findJuSelectionCascadeMaker(popup, value) {
+            const expected = normalizeJuSelectionCascadeText(value);
+            const matches = Array.from(popup?.querySelectorAll?.(".junaviweb-popup-maker-list-container") || [])
+                .filter(element => isSearchBridgeElementVisible(element))
+                .filter(element => getJuSelectionCascadeMakerLabel(element) === expected);
+            return matches.length === 1 ? matches[0] : null;
+        }
+
+        function isJuSelectionCascadeButtonEnabled(button) {
+            return !!button && !button.disabled && button.getAttribute("aria-disabled") !== "true";
+        }
+
+        async function restoreJuSelectionCascade(cascade, targetMode) {
+            const form = getJuSearchBridgeForm(targetMode);
+            const prefix = getJuSearchBridgeTargetPrefix(targetMode);
+            const deadline = Date.now() + JU_SELECTION_CASCADE_MAX_WAIT_MS;
+            const wait = read => waitForJuSelectionCascadeValue(read, Math.max(0, deadline - Date.now()));
+            if (!form || !cascade?.cars?.length) return false;
+            if (new Set(cascade.cars.map(car => car.maker)).size !== 1) return false;
+
+            const opener = document.getElementById(`${prefix}Maker_CarName`) ||
+                form.querySelector("[id$='-Maker_CarName']");
+            if (!clickSearchBridgeElement(opener)) return false;
+
+            let popup = await wait(getJuSelectionCascadePopup);
+            if (!popup) return false;
+
+            for (const car of cascade.cars) {
+                const maker = await wait(() => findJuSelectionCascadeMaker(getJuSelectionCascadePopup(), car.maker));
+                const makerTarget = maker?.querySelector("[id$='-b4-Content']") || maker;
+                if (!clickSearchBridgeElement(makerTarget)) return false;
+
+                const carInput = await wait(() => findJuSelectionCascadeCheckbox(getJuSelectionCascadePopup(), "CarNameCheckbox", car.car));
+                if (!carInput) return false;
+                if (!carInput.checked && !clickSearchBridgeElement(carInput)) return false;
+
+                const selectedCar = await wait(() => {
+                    const current = findJuSelectionCascadeCheckbox(getJuSelectionCascadePopup(), "CarNameCheckbox", car.car);
+                    return current?.checked ? current : null;
+                });
+                if (!selectedCar) return false;
+            }
+
+            const gradeCars = cascade.cars.filter(car => car.grades?.length);
+            if (gradeCars.length) {
+                const next = await wait(() => {
+                    const button = findVisibleSearchBridgeButtonByText("型式・グレード選択へ", getJuSelectionCascadePopup() || document);
+                    return isJuSelectionCascadeButtonEnabled(button) ? button : null;
+                });
+                if (!clickSearchBridgeElement(next)) return false;
+
+                popup = await wait(() => getJuSelectionCascadeCheckboxes(getJuSelectionCascadePopup(), "Checkbox3").length > 0
+                    ? getJuSelectionCascadePopup()
+                    : null);
+                if (!popup) return false;
+
+                for (const car of gradeCars) {
+                    for (const grade of car.grades) {
+                        const gradeInput = await wait(() => findJuSelectionCascadeCheckbox(getJuSelectionCascadePopup(), "Checkbox3", grade));
+                        if (!gradeInput) return false;
+                        if (!gradeInput.checked && !clickSearchBridgeElement(gradeInput)) return false;
+
+                        const selectedGrade = await wait(() => {
+                            const current = findJuSelectionCascadeCheckbox(getJuSelectionCascadePopup(), "Checkbox3", grade);
+                            return current?.checked ? current : null;
+                        });
+                        if (!selectedGrade) return false;
+                    }
+                }
+            }
+
+            const close = await wait(() => {
+                const button = findVisibleSearchBridgeButtonByText("確定して閉じる", getJuSelectionCascadePopup() || document);
+                return isJuSelectionCascadeButtonEnabled(button) ? button : null;
+            });
+            if (!clickSearchBridgeElement(close)) return false;
+
+            return !!await wait(() => !getJuSelectionCascadePopup());
         }
 
         function getNormalizedJuSearchBridgePath() {
@@ -4692,6 +4684,7 @@
 
         function isJuSearchBridgeConditionControl(el) {
             if (!isSearchBridgeSavableControl(el)) return false;
+            if (/(?:Maker_CarName|Katashiki_Grade|CarNameCheckbox|Checkbox3)/i.test(el.id || "")) return false;
             if (/^b\d+-/.test(el.id || "")) return true;
 
             return isJuSearchBridgeSearchPage();
@@ -4714,11 +4707,22 @@
 
             if (fields.length === 0) return null;
 
+            const juSelectionCascade = getJuSelectionCascadeForSaving(form);
+            if (juSelectionCascade?.blocked) {
+                showSiteSearchBridgeNotice(
+                    getJuSearchBridgeAdapter(),
+                    "JUの車名選択を確認できません。車名選択を開き直して選び直してから保存してください。",
+                    "error"
+                );
+                return null;
+            }
+
             return {
                 version: MLIVE_SEARCH_BRIDGE_VERSION,
                 sourceMode,
                 fields,
-                summary: buildSiteSearchBridgeConditionSummary(fields),
+                juSelectionCascade,
+                summary: buildJuSearchBridgeConditionSummary(fields, juSelectionCascade),
                 savedAt: Date.now(),
                 sourceUrl: location.href
             };
@@ -4771,10 +4775,10 @@
                 if (!isJuSearchBridgeFieldRecordApplied(target, record)) return false;
             }
 
-            return comparableCount > 0;
+            return comparableCount > 0 || !!normalizeJuSelectionCascade(condition?.juSelectionCascade)?.cars?.length;
         }
 
-        function restoreJuSearchBridgeCondition(condition, targetMode) {
+        function restoreJuSearchBridgeStandardCondition(condition, targetMode) {
             const prefix = getJuSearchBridgeTargetPrefix(targetMode);
             const form = getJuSearchBridgeForm(targetMode) || document;
 
@@ -4789,6 +4793,27 @@
 
                 applySearchBridgeFieldRecord(target, record);
             }
+        }
+
+        async function restoreJuSearchBridgeCondition(condition, targetMode) {
+            const cascade = normalizeJuSelectionCascade(condition?.juSelectionCascade);
+            if (cascade?.blocked) return true;
+
+            if (cascade?.cars?.length) {
+                const restored = await restoreJuSelectionCascade(cascade, targetMode);
+                if (!restored) {
+                    condition.juSelectionCascade = { ...cascade, blocked: true };
+                    showSiteSearchBridgeNotice(
+                        getJuSearchBridgeAdapter(),
+                        "JUのメーカー・車名・型式を復元できないため、検索せず停止しました。検索画面で条件を再保存してください。",
+                        "error"
+                    );
+                    return true;
+                }
+            }
+
+            restoreJuSearchBridgeStandardCondition(condition, targetMode);
+            return true;
         }
 
         function getJuSearchBridgeTargetUrl(mode) {
@@ -4821,6 +4846,15 @@
             const mode = targetMode || getJuSearchBridgeMode();
             let attempt = 0;
 
+            if (normalizeJuSelectionCascade(condition?.juSelectionCascade)?.blocked) {
+                showSiteSearchBridgeNotice(
+                    getJuSearchBridgeAdapter(),
+                    "JUの車名選択を復元できないため、検索を実行しません。検索画面で条件を再保存してください。",
+                    "error"
+                );
+                return;
+            }
+
             const submit = () => {
                 attempt += 1;
 
@@ -4832,7 +4866,7 @@
                         return;
                     }
 
-                    restoreJuSearchBridgeCondition(condition, mode);
+                    restoreJuSearchBridgeStandardCondition(condition, mode);
 
                     setTimeout(() => {
                         const settledForm = getJuSearchBridgeForm(mode);
@@ -4854,7 +4888,7 @@
                             findSearchBridgeButtonByText("この条件で検索", document);
 
                         if (button && !button.disabled) {
-                            clickSearchBridgeElement(button, true);
+                            clickSearchBridgeElement(button);
                             return;
                         }
 
@@ -4878,14 +4912,11 @@
                 storageKey: JU_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: JU_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "ju-search-bridge-ui",
-                buildId: "ju-submit-ready-20260710",
+                buildId: "ju-cascade-restore-20260710",
                 position: { right: "12px", top: "84px" },
                 launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.ju,
                 targetModes: ["listing", "market"],
-                appendPanelActions: (headerActions, wrap, adapter) => {
-                    headerActions.appendChild(createJuSelectionDiagnosticPanelAction(wrap, adapter));
-                },
                 shouldInstall: shouldInstallJuSearchBridge,
                 getCurrentMode: getJuSearchBridgeMode,
                 getModeLabel: getJuSearchBridgeModeLabel,
@@ -4910,7 +4941,7 @@
             const adapter = getJuSearchBridgeAdapter();
             installSiteSearchBridge(adapter);
             applySiteSearchBridgePending(adapter);
-            void initializeJuSelectionDiagnostic();
+            installJuSearchBridgeSelectionCapture();
         }
 
         // MLive用 自動選択ロジック
