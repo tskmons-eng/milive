@@ -1719,10 +1719,25 @@
                 const storage = getSiteSearchBridgeLocalStorage();
                 const result = storage ? await storage.get(adapter.pendingKey) : {};
                 const storedPending = result[adapter.pendingKey];
-                const fallbackPending = !storedPending && typeof adapter.getPendingFallback === "function"
+                const fallbackPending = typeof adapter.getPendingFallback === "function"
                     ? adapter.getPendingFallback(currentMode)
                     : null;
-                const pending = storedPending || fallbackPending;
+                const storedTargetMode = normalizeSiteSearchBridgeMode(storedPending?.targetMode);
+                const fallbackTargetMode = normalizeSiteSearchBridgeMode(fallbackPending?.targetMode);
+                const useFallback = fallbackTargetMode === currentMode && storedTargetMode !== currentMode;
+                const pending = useFallback ? fallbackPending : (storedPending || fallbackPending);
+                const fromFallback = pending === fallbackPending && !!fallbackPending;
+
+                if (typeof adapter.onPendingProbe === "function") {
+                    adapter.onPendingProbe({
+                        currentMode,
+                        storedPresent: !!storedPending,
+                        storedTargetMode,
+                        fallbackPresent: !!fallbackPending,
+                        fallbackTargetMode,
+                        selectedSource: pending ? (fromFallback ? "fallback" : "storage") : "none"
+                    });
+                }
                 if (!pending) {
                     if (!storage && typeof adapter.onPendingStorageUnavailable === "function") {
                         adapter.onPendingStorageUnavailable(currentMode);
@@ -1733,7 +1748,7 @@
                 }
 
                 if (typeof adapter.onPendingFound === "function") {
-                    adapter.onPendingFound(pending, currentMode, { fromFallback: !!fallbackPending });
+                    adapter.onPendingFound(pending, currentMode, { fromFallback });
                 }
 
                 if (pending.version !== MLIVE_SEARCH_BRIDGE_VERSION || !pending.condition) {
@@ -2025,6 +2040,7 @@
         const ARAI_KAIJO_DIAGNOSTIC_ATTR = "data-mlive-arai-kaijo-diagnostic";
         const ARAI_KAIJO_PROBE_ONLY_ATTR = "data-mlive-arai-kaijo-probe-only";
         const ARAI_KAIJO_ACTION_EVENT = "mlive-linkifier:arai-kaijo-action";
+        const ARAI_PENDING_PROBE_ATTR = "data-mlive-arai-pending-probe";
         const ARAI_SEARCH_KIND_NAME = "name";
         const ARAI_SEARCH_KIND_CONDITION = "condition";
 
@@ -2110,6 +2126,17 @@
                 return pending && typeof pending === "object" ? pending : null;
             } catch {
                 return null;
+            }
+        }
+
+        function recordAraiPendingProbe(detail) {
+            try {
+                document.documentElement?.setAttribute(ARAI_PENDING_PROBE_ATTR, JSON.stringify({
+                    at: Date.now(),
+                    ...detail
+                }));
+            } catch {
+                // Diagnostics must never interrupt the bridge.
             }
         }
 
@@ -3406,7 +3433,7 @@
                 storageKey: ARAI_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: ARAI_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "arai-search-bridge-ui",
-                buildId: "arai-main-fallback-retry-20260710",
+                buildId: "arai-main-fallback-select-20260710",
                 position: { right: "12px", top: "132px" },
                 launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.arai,
@@ -3447,6 +3474,7 @@
                     });
                 },
                 getPendingFallback: getAraiPendingFallback,
+                onPendingProbe: recordAraiPendingProbe,
                 clearPendingFallback: clearAraiPendingFallback,
                 onPendingFound: handleAraiPendingFound,
                 beforePendingRestore: handleAraiPendingBeforeRestore,
