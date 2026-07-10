@@ -4452,10 +4452,30 @@
             };
         }
 
+        function mergeJuSelectionCascadeVisibleSelection(cascade, visible) {
+            if (!cascade || cascade.blocked) return cascade;
+
+            const carName = normalizeJuSelectionCascadeText(visible?.car);
+            const gradeName = normalizeJuSelectionCascadeText(visible?.grade);
+            if (!carName || !gradeName) return cascade;
+
+            const matchingCars = cascade.cars.filter(car => car.car === carName);
+            if (matchingCars.length !== 1) return cascade;
+
+            const cars = cascade.cars.map(car => {
+                if (car !== matchingCars[0] || car.grades.includes(gradeName)) return car;
+                return { ...car, grades: [...car.grades, gradeName] };
+            });
+            return normalizeJuSelectionCascade({ ...cascade, cars }) || cascade;
+        }
+
         function getJuSelectionCascadeForSaving(form) {
             const draft = getJuSelectionCascadeDraft();
-            const cascade = normalizeJuSelectionCascade(draft);
             const visible = getJuSelectionCascadeVisibleSelection(form);
+            const cascade = mergeJuSelectionCascadeVisibleSelection(
+                normalizeJuSelectionCascade(draft),
+                visible
+            );
 
             if (visible.car || visible.grade) {
                 const selectedCar = cascade?.cars?.find(car => car.car === visible.car) || null;
@@ -4968,7 +4988,7 @@
                 storageKey: JU_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: JU_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "ju-search-bridge-ui",
-                buildId: "ju-main-react-bridge-v2-20260710",
+                buildId: "ju-main-react-bridge-v3-20260710",
                 position: { right: "12px", top: "84px" },
                 launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.ju,
