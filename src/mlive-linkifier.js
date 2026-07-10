@@ -4309,10 +4309,20 @@
         function getJuSelectionCascadeInputLabel(input) {
             if (!input) return "";
 
-            const label = input.labels?.[0] ||
-                (input.id ? document.querySelector(`label[for="${CSS.escape(input.id)}"]`) : null) ||
-                input.closest("label,li,div");
-            return normalizeJuSelectionCascadeText(label?.textContent || input.getAttribute("aria-label") || input.value || "");
+            const candidates = [
+                ...Array.from(input.labels || []),
+                input.id ? document.querySelector(`label[for="${CSS.escape(input.id)}"]`) : null,
+                input.parentElement?.nextElementSibling,
+                input.parentElement?.parentElement,
+                input.closest("label,li,div")
+            ];
+
+            for (const candidate of candidates) {
+                const text = normalizeJuSelectionCascadeText(candidate?.textContent || "");
+                if (text) return text;
+            }
+
+            return normalizeJuSelectionCascadeText(input.getAttribute("aria-label") || input.value || "");
         }
 
         function getJuSelectionCascadeMakerLabel(element) {
