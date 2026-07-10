@@ -4,16 +4,25 @@
 
     const ACTION_ATTR = "data-mlive-ju-main-action";
     const RESULT_ATTR = "data-mlive-ju-main-action-result";
+    const HISTORY_ATTR = "data-mlive-ju-main-action-history";
     const TOKEN_ATTR = "data-mlive-ju-main-action-token";
     const READY_ATTR = "data-mlive-ju-main-bridge-ready";
     const ACTION_EVENT = "mlive-linkifier:ju-main-action";
+    const ACTION_HISTORY_LIMIT = 24;
 
     const writeResult = result => {
         const root = document.documentElement;
         if (!root) return;
 
         try {
-            root.setAttribute(RESULT_ATTR, JSON.stringify(result).slice(0, 1200));
+            const entry = { at: Date.now(), ...result };
+            root.setAttribute(RESULT_ATTR, JSON.stringify(entry).slice(0, 1200));
+
+            const rawHistory = root.getAttribute(HISTORY_ATTR) || "[]";
+            const history = JSON.parse(rawHistory);
+            const nextHistory = Array.isArray(history) ? history : [];
+            nextHistory.push(entry);
+            root.setAttribute(HISTORY_ATTR, JSON.stringify(nextHistory.slice(-ACTION_HISTORY_LIMIT)).slice(0, 12000));
         } catch {
             root.setAttribute(RESULT_ATTR, JSON.stringify({ ok: false, error: "result_serialize_failed" }));
         }
@@ -43,11 +52,12 @@
     const findReactProps = node => {
         if (!node) return null;
 
-        for (const key of Object.getOwnPropertyNames(node)) {
-            if (!/^__react(?:Props|EventHandlers)\$/.test(key)) continue;
-
-            const props = node[key];
-            if (props && typeof props === "object") return { key, props };
+        const keys = Object.getOwnPropertyNames(node);
+        const propKey = keys.find(key => /^__reactProps\$/.test(key)) ||
+            keys.find(key => /^__reactEventHandlers\$/.test(key));
+        if (propKey) {
+            const props = node[propKey];
+            if (props && typeof props === "object") return { key: propKey, props };
         }
 
         return null;
@@ -129,7 +139,8 @@
                 eventName,
                 targetId: target.id || "",
                 handlerNodeId: reactHandler.node.id || "",
-                propKey: reactHandler.propKey
+                propKey: reactHandler.propKey,
+                handlerName: reactHandler.handler.name || "anonymous"
             });
 
             Promise.resolve(output).catch(error => {
