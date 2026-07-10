@@ -2931,8 +2931,6 @@
         }
 
         function isAraiVenueSelectionStep(condition = null, mode = getAraiSearchBridgeMode()) {
-            if (condition && isAraiActiveSearchInputForm(condition, mode)) return false;
-
             const venueButton = getVisibleAraiSearchButton(["btn_kaijo", "btKaijo_exe"]);
             const venueArea = document.getElementById("tbKaijoList");
             const all4w = document.getElementById("CKALL4W");
@@ -3423,7 +3421,7 @@
                 storageKey: ARAI_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: ARAI_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "arai-search-bridge-ui",
-                buildId: "arai-main-fallback-select-20260710",
+                buildId: "arai-venue-priority-20260710",
                 position: { right: "12px", top: "132px" },
                 launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.arai,
