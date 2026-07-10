@@ -4160,20 +4160,6 @@
                 isSearchMode: isAraiSearchBridgeMode,
                 canSaveCurrent: () => isAraiSearchBridgeMode(getAraiSearchBridgeMode()) && document.querySelectorAll("input,select,textarea").length > 0,
                 collectCondition: collectAraiSearchBridgeCondition,
-                appendPanelActions: (headerActions) => {
-                    headerActions.appendChild(createSiteSearchBridgeButton("Arai保留クリア", async () => {
-                        await clearAraiSearchBridgePending("panel_clear");
-                        showSiteSearchBridgeNotice(getAraiSearchBridgeAdapter(), "Araiの保留中検索をクリアしました");
-                    }));
-                    headerActions.appendChild(createSiteSearchBridgeButton("Arai状態", async () => {
-                        runAraiKaijoSelectorAction("diagnose_state");
-                        recordAraiSearchBridgeLog("診断記録", { manual: true });
-                        showSiteSearchBridgeNotice(getAraiSearchBridgeAdapter(), "Arai診断を記録しました");
-                    }));
-                },
-                appendPanelContent: async (wrap, adapter) => {
-                    wrap.appendChild(await createAraiNameDiagnosticControls(wrap, adapter));
-                },
                 afterPendingCreated: async (pending, targetMode) => {
                     resetAraiSearchBridgeFlow(pending);
                     recordAraiSearchBridgeLog("pending作成", {
@@ -4354,6 +4340,48 @@
             return mode === "market" ? "b3-" : "b5-";
         }
 
+        function getJuSearchBridgeTargetControl(form, prefix, key) {
+            if (!key) return null;
+
+            return document.getElementById(`${prefix}${key}`) ||
+                form?.querySelector?.(`[id$="-${CSS.escape(key)}"]`) ||
+                document.querySelector(`[id$="-${CSS.escape(key)}"]`);
+        }
+
+        function isJuSearchBridgeFieldRecordApplied(target, record) {
+            const type = String(target?.type || "").toLowerCase();
+            if (type === "checkbox" || type === "radio") {
+                return !!target.checked === !!record.checked;
+            }
+
+            if (target?.tagName === "SELECT" && target.multiple && Array.isArray(record.selectedValues)) {
+                const current = Array.from(target.selectedOptions).map(option => String(option.value ?? ""));
+                const expected = record.selectedValues.map(value => String(value ?? ""));
+                return current.length === expected.length && current.every(value => expected.includes(value));
+            }
+
+            return String(target?.value ?? "") === String(record.value ?? "");
+        }
+
+        function areJuSearchBridgeConditionFieldsApplied(condition, targetMode) {
+            const form = getJuSearchBridgeForm(targetMode);
+            if (!form) return false;
+
+            const prefix = getJuSearchBridgeTargetPrefix(targetMode);
+            let comparableCount = 0;
+
+            for (const record of condition?.fields || []) {
+                const key = record.key || getJuSearchBridgeFieldKey(record);
+                const target = getJuSearchBridgeTargetControl(form, prefix, key);
+                if (!target) continue;
+
+                comparableCount += 1;
+                if (!isJuSearchBridgeFieldRecordApplied(target, record)) return false;
+            }
+
+            return comparableCount > 0;
+        }
+
         function restoreJuSearchBridgeCondition(condition, targetMode) {
             const prefix = getJuSearchBridgeTargetPrefix(targetMode);
             const form = getJuSearchBridgeForm(targetMode) || document;
@@ -4397,6 +4425,60 @@
             showSiteSearchBridgeNotice(getJuSearchBridgeAdapter(), "検索ボタンが見つかりません", "error");
         }
 
+        function submitJuSearchBridgeWhenReady(condition, targetMode) {
+            const mode = targetMode || getJuSearchBridgeMode();
+            let attempt = 0;
+
+            const submit = () => {
+                attempt += 1;
+
+                // JU rerenders reactive fields after restore, so wait and apply once more before submitting.
+                setTimeout(() => {
+                    const form = getJuSearchBridgeForm(mode);
+                    if (!form) {
+                        showSiteSearchBridgeNotice(getJuSearchBridgeAdapter(), "JU search form was not found", "error");
+                        return;
+                    }
+
+                    restoreJuSearchBridgeCondition(condition, mode);
+
+                    setTimeout(() => {
+                        const settledForm = getJuSearchBridgeForm(mode);
+                        const restored = !condition || areJuSearchBridgeConditionFieldsApplied(condition, mode);
+                        if ((!settledForm || !restored) && attempt < 3) {
+                            submit();
+                            return;
+                        }
+
+                        if (!settledForm || !restored) {
+                            showSiteSearchBridgeNotice(getJuSearchBridgeAdapter(), "JU condition restore did not settle", "error");
+                            return;
+                        }
+
+                        const button =
+                            findVisibleSearchBridgeButtonByText("この条件で検索", settledForm) ||
+                            findVisibleSearchBridgeButtonByText("この条件で検索", document) ||
+                            findSearchBridgeButtonByText("この条件で検索", settledForm) ||
+                            findSearchBridgeButtonByText("この条件で検索", document);
+
+                        if (button && !button.disabled) {
+                            clickSearchBridgeElement(button, true);
+                            return;
+                        }
+
+                        if (typeof settledForm.requestSubmit === "function") {
+                            settledForm.requestSubmit();
+                            return;
+                        }
+
+                        showSiteSearchBridgeNotice(getJuSearchBridgeAdapter(), "JU search button was not found", "error");
+                    }, 360);
+                }, 360);
+            };
+
+            submit();
+        }
+
         function getJuSearchBridgeAdapter() {
             return {
                 siteId: "ju",
@@ -4404,6 +4486,7 @@
                 storageKey: JU_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: JU_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "ju-search-bridge-ui",
+                buildId: "ju-submit-ready-20260710",
                 position: { right: "12px", top: "84px" },
                 launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.ju,
@@ -4424,7 +4507,7 @@
                     const mode = getJuSearchBridgeMode();
                     return isJuSearchBridgeMode(mode) && !!getJuSearchBridgeForm(mode);
                 },
-                submitSearch: submitJuSearchBridge
+                submitSearch: submitJuSearchBridgeWhenReady
             };
         }
 
