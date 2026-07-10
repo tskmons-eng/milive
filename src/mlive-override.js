@@ -7,6 +7,7 @@
         const ARAI_KAIJO_ERROR_ATTR = "data-mlive-arai-kaijo-error";
         const ARAI_KAIJO_DIAGNOSTIC_ATTR = "data-mlive-arai-kaijo-diagnostic";
         const ARAI_KAIJO_PROBE_ONLY_ATTR = "data-mlive-arai-kaijo-probe-only";
+        const ARAI_KAIJO_PAYLOAD_ATTR = "data-mlive-arai-kaijo-payload";
         const ARAI_KAIJO_ACTION_EVENT = "mlive-linkifier:arai-kaijo-action";
         const ARAI_PENDING_FALLBACK_ATTR = "data-mlive-arai-pending-fallback";
         const ARAI_PENDING_FALLBACK_COMMAND_ATTR = "data-mlive-arai-pending-fallback-command";
@@ -247,6 +248,81 @@
 
             dispatchAraiNativeClick(el);
             return { ok: true, method: `mouseevent:${id}`, error: "" };
+        };
+
+        const getAraiNameCascadePayload = () => {
+            const raw = document.documentElement?.getAttribute(ARAI_KAIJO_PAYLOAD_ATTR) || "";
+            if (!raw) return null;
+
+            try {
+                const payload = JSON.parse(raw);
+                return payload && typeof payload === "object" ? payload : null;
+            } catch {
+                return null;
+            }
+        };
+
+        const getAraiNameCascadeStepState = (payload = {}) => {
+            const candidate = document.getElementById(payload.candidateId || "");
+            const input = document.getElementById(payload.inputId || "");
+            return {
+                kind: String(payload.kind || ""),
+                candidateId: String(payload.candidateId || ""),
+                candidateExists: !!candidate,
+                candidateVisible: isVisible(candidate),
+                candidateText: String(candidate?.textContent || "").replace(/\s+/g, " ").trim().slice(0, 120),
+                inputId: String(payload.inputId || ""),
+                inputExists: !!input,
+                selected: !!input?.checked
+            };
+        };
+
+        const runAraiNameCascadeStep = () => {
+            const payload = getAraiNameCascadePayload();
+            if (!payload?.candidateId || !payload?.inputId) {
+                return { ok: false, error: "Arai name cascade payload is invalid", before: null, after: null };
+            }
+
+            const before = getAraiNameCascadeStepState(payload);
+            if (!before.candidateExists || !before.inputExists) {
+                return {
+                    ok: false,
+                    error: "Arai name cascade candidate is not ready",
+                    before,
+                    after: getAraiNameCascadeStepState(payload)
+                };
+            }
+            if (before.selected) {
+                return { ok: true, method: "already-selected", before, after: before };
+            }
+
+            let alertMessage = "";
+            const originalAlert = window.alert;
+            let clickResult = null;
+            try {
+                window.alert = (message) => {
+                    alertMessage = String(message || "").slice(0, 300);
+                };
+                clickResult = triggerAraiElementClick(payload.candidateId);
+            } catch (error) {
+                return {
+                    ok: false,
+                    error: String(error?.message || error).slice(0, 300),
+                    before,
+                    after: getAraiNameCascadeStepState(payload)
+                };
+            } finally {
+                window.alert = originalAlert;
+            }
+
+            const after = getAraiNameCascadeStepState(payload);
+            if (alertMessage) {
+                return { ok: false, error: alertMessage, before, after };
+            }
+            if (!clickResult?.ok) {
+                return { ok: false, error: clickResult?.error || "Arai name cascade click failed", before, after };
+            }
+            return { ok: true, method: clickResult.method, before, after };
         };
 
         const getAraiSelectedCount = (state) => {
@@ -597,6 +673,23 @@
                     root?.removeAttribute(ARAI_KAIJO_ERROR_ATTR);
                     writeAraiKaijoDiagnostic({
                         phase: "diagnose_state",
+                        before,
+                        after: readAraiKaijoState(action)
+                    });
+                    return;
+                }
+
+                if (action === "name_cascade_step") {
+                    const cascadeResult = runAraiNameCascadeStep();
+                    root?.setAttribute(ARAI_KAIJO_RESULT_ATTR, cascadeResult.ok ? "1" : "0");
+                    if (cascadeResult.ok) {
+                        root?.removeAttribute(ARAI_KAIJO_ERROR_ATTR);
+                    } else {
+                        root?.setAttribute(ARAI_KAIJO_ERROR_ATTR, cascadeResult.error || "Arai name cascade step failed");
+                    }
+                    writeAraiKaijoDiagnostic({
+                        phase: "name_cascade_step",
+                        result: cascadeResult,
                         before,
                         after: readAraiKaijoState(action)
                     });

@@ -1297,15 +1297,34 @@
             };
         }
 
+        function normalizeAraiNameCascade(value) {
+            const steps = Array.isArray(value?.steps) ? value.steps : [];
+            const normalizedSteps = steps
+                .map(step => ({
+                    kind: String(step?.kind || "").trim(),
+                    sourceId: String(step?.sourceId || "").trim(),
+                    inputId: String(step?.inputId || "").trim(),
+                    inputValue: String(step?.inputValue || "").trim(),
+                    label: normalizeSearchBridgeText(step?.label || "").slice(0, 120),
+                    candidateKey: normalizeSearchBridgeText(step?.candidateKey || "").slice(0, 120)
+                }))
+                .filter(step => /^(maker|car|shasyu|grade|katasiki)$/.test(step.kind) &&
+                    !!(step.candidateKey || step.label));
+
+            return normalizedSteps.length ? { version: 1, steps: normalizedSteps } : undefined;
+        }
+
         function normalizeSiteSearchBridgeCondition(condition) {
             if (!condition || !Array.isArray(condition.fields)) return null;
 
             const savedAt = Number(condition.savedAt || Date.now());
+            const araiNameCascade = normalizeAraiNameCascade(condition.araiNameCascade);
             return {
                 version: MLIVE_SEARCH_BRIDGE_VERSION,
                 sourceMode: normalizeSiteSearchBridgeMode(condition.sourceMode),
                 araiSearchKind: normalizeSiteSearchBridgeKind(condition.araiSearchKind || condition.searchKind),
                 fields: condition.fields.filter(Boolean),
+                araiNameCascade,
                 summary: normalizeSearchBridgeSummary(condition.summary),
                 savedAt: Number.isFinite(savedAt) ? savedAt : Date.now(),
                 sourceUrl: condition.sourceUrl || ""
@@ -1808,7 +1827,7 @@
                     return;
                 }
 
-                const restoreResult = adapter.restoreCondition(condition, currentMode);
+                const restoreResult = await adapter.restoreCondition(condition, currentMode);
                 if (restoreResult === false) {
                     scheduleSiteSearchBridgePendingRetry(adapter, 700);
                     return;
@@ -2052,10 +2071,12 @@
         const ARAI_KAIJO_ERROR_ATTR = "data-mlive-arai-kaijo-error";
         const ARAI_KAIJO_DIAGNOSTIC_ATTR = "data-mlive-arai-kaijo-diagnostic";
         const ARAI_KAIJO_PROBE_ONLY_ATTR = "data-mlive-arai-kaijo-probe-only";
+        const ARAI_KAIJO_PAYLOAD_ATTR = "data-mlive-arai-kaijo-payload";
         const ARAI_KAIJO_ACTION_EVENT = "mlive-linkifier:arai-kaijo-action";
         const ARAI_PENDING_PROBE_ATTR = "data-mlive-arai-pending-probe";
         const ARAI_SEARCH_KIND_NAME = "name";
         const ARAI_SEARCH_KIND_CONDITION = "condition";
+        const ARAI_NAME_CASCADE_MAX_WAIT_MS = 12000;
 
         const araiSearchBridgeFlow = {
             pendingId: "",
@@ -2073,6 +2094,12 @@
             nextActionFailures: 0,
             lastSignature: "",
             sameSignatureCount: 0,
+            nameCascadeSignature: "",
+            nameCascadeIndex: 0,
+            nameCascadeActionAt: 0,
+            nameCascadeActionId: "",
+            nameCascadeWaitStartedAt: 0,
+            nameCascadeLoggedIndex: -1,
             stopped: false
         };
 
@@ -2354,8 +2381,10 @@
         }
 
         async function stopAraiNameDiagnostic() {
-            const record = araiNameDiagnosticRecord;
+            const record = araiNameDiagnosticRecord || await getAraiNameDiagnosticRecord();
             if (!record) return null;
+
+            araiNameDiagnosticRecord = record;
 
             recordAraiNameDiagnosticStep("recording_finished");
             record.status = "stopped";
@@ -2392,6 +2421,9 @@
                 showSiteSearchBridgeNotice(getAraiSearchBridgeAdapter(), "選択記録はありません", "error");
                 return;
             }
+
+            araiNameDiagnosticRecord = record;
+            publishAraiNameDiagnosticSummary(record);
 
             const old = document.getElementById("arai-name-diagnostic-log");
             if (old) old.remove();
@@ -2499,6 +2531,12 @@
                 nextActionFailures: 0,
                 lastSignature: "",
                 sameSignatureCount: 0,
+                nameCascadeSignature: "",
+                nameCascadeIndex: 0,
+                nameCascadeActionAt: 0,
+                nameCascadeActionId: "",
+                nameCascadeWaitStartedAt: 0,
+                nameCascadeLoggedIndex: -1,
                 stopped: false
             });
         }
@@ -2797,6 +2835,7 @@
             araiSearchBridgeFlow.stopped = true;
             recordAraiSearchBridgeLog("失敗停止", { reason, ...detail });
             showSiteSearchBridgeNotice(getAraiSearchBridgeAdapter(), reason, "error");
+            clearAraiPendingFallback();
             await chrome.storage.local.remove([ARAI_SEARCH_BRIDGE_PENDING_KEY, ARAI_SEARCH_BRIDGE_RUN_KEY]);
         }
 
@@ -2911,7 +2950,115 @@
                 name === "history_check" ||
                 name === "pattern" ||
                 id === "aaa" ||
-                /^(maker|model|car|grade|syasyu|syamei|shashu)\d+$/i.test(id);
+                /^(maker|model|car|grade|syasyu|syamei|shashu|ckcarname|ckshasyu|ckgrade|ckkatasiki)\d+$/i.test(id);
+        }
+
+        function isAraiNameCascadeFieldRecord(record) {
+            return /^(maker|ckcarname|ckshasyu|ckgrade|ckkatasiki)\d+$/i.test(String(record?.id || ""));
+        }
+
+        function isAraiNameSearchTailFieldRecord(record) {
+            const id = String(record?.id || "").toLowerCase();
+            const name = String(record?.name || "").toLowerCase();
+            if (isAraiNameSearchKeywordRecord(record) || id === "aaa") return true;
+
+            return /^(radio[13]|nen(?:_|$)|soko(?:_|$)|hyoka(?:_|$)|sekisai(?:_|$)|bariki(?:_|$)|me_kbn(?:_|$)|haiki(?:_|$)|shaken(?:_|$)|color(?:_|$)|mission(?:_|$)|shift(?:_|$)|fuel(?:_|$)|gas(?:_|$)|cc(?:_|$)|katashiki(?:_|$)|katasiki(?:_|$))/.test(id) ||
+                /^(nen|soko|hyoka|sekisai|bariki|me_kbn|haiki|shaken|color|mission|shift|fuel|gas|cc|katashiki|katasiki)/.test(name);
+        }
+
+        function isAraiNameSearchStructuredFieldRecord(record) {
+            return isAraiNameCascadeFieldRecord(record) || isAraiNameSearchTailFieldRecord(record);
+        }
+
+        const ARAI_NAME_CASCADE_DEFINITIONS = [
+            {
+                kind: "maker",
+                selector: "#makerList a[id^='t']",
+                getInputId: id => `maker${String(id).slice(1)}`
+            },
+            {
+                kind: "car",
+                selector: "#syameiList a[id^='carName']",
+                getInputId: id => `ck${id}`
+            },
+            {
+                kind: "shasyu",
+                selector: "#shasyuList a[id^='shasyu']",
+                getInputId: id => `ck${id}`
+            },
+            {
+                kind: "grade",
+                selector: "#gradeList a[id^='grade']",
+                getInputId: id => `ck${id}`
+            },
+            {
+                kind: "katasiki",
+                selector: "#katasikiList a[id^='katasiki']",
+                getInputId: id => `ck${id}`
+            }
+        ];
+
+        function getAraiNameCascadeDefinition(kind) {
+            return ARAI_NAME_CASCADE_DEFINITIONS.find(definition => definition.kind === kind) || null;
+        }
+
+        function normalizeAraiNameCascadeLabel(value) {
+            return normalizeSearchBridgeText(value)
+                .replace(/[０-９]/g, char => String.fromCharCode(char.charCodeAt(0) - 0xFEE0))
+                .replace(/\d[\d,]*\s*(?:台|件)/g, " ")
+                .replace(/\s+/g, " ")
+                .trim();
+        }
+
+        function getAraiNameCascadeCandidateKey(value) {
+            return normalizeAraiNameCascadeLabel(value)
+                .replace(/\s+/g, "")
+                .toLowerCase();
+        }
+
+        function getAraiSelectedNameCascadeSteps() {
+            const steps = [];
+
+            for (const definition of ARAI_NAME_CASCADE_DEFINITIONS) {
+                const candidates = Array.from(document.querySelectorAll(definition.selector));
+                for (const candidate of candidates) {
+                    const inputId = definition.getInputId(candidate.id);
+                    const input = document.getElementById(inputId);
+                    if (!input?.checked) continue;
+
+                    const label = normalizeAraiNameCascadeLabel(candidate.textContent || "");
+                    const candidateKey = getAraiNameCascadeCandidateKey(label);
+                    if (!label || !candidateKey) continue;
+
+                    steps.push({
+                        kind: definition.kind,
+                        sourceId: candidate.id,
+                        inputId,
+                        inputValue: String(input.value || ""),
+                        label,
+                        candidateKey
+                    });
+                }
+            }
+
+            return steps;
+        }
+
+        function getAraiNameCascadeSteps(condition = null) {
+            const steps = Array.isArray(condition?.araiNameCascade?.steps)
+                ? condition.araiNameCascade.steps
+                : [];
+
+            return steps.filter(step => {
+                const definition = getAraiNameCascadeDefinition(step?.kind);
+                return !!definition && !!getAraiNameCascadeCandidateKey(step?.candidateKey || step?.label || "");
+            });
+        }
+
+        function hasAraiLegacyNameCascadeSelection(condition = null) {
+            return (condition?.fields || []).some(record =>
+                isAraiNameCascadeFieldRecord(record) && !!record.checked
+            );
         }
 
         function getAraiConditionSearchKind(condition) {
@@ -2928,7 +3075,7 @@
 
         function isAraiFieldCompatibleWithSearchKind(record, searchKind) {
             const kind = normalizeSiteSearchBridgeKind(searchKind) || ARAI_SEARCH_KIND_NAME;
-            if (kind === ARAI_SEARCH_KIND_NAME) return isAraiNameSearchFieldRecord(record);
+            if (kind === ARAI_SEARCH_KIND_NAME) return isAraiNameSearchStructuredFieldRecord(record);
             return !isAraiNameSearchFieldRecord(record);
         }
 
@@ -3003,12 +3150,22 @@
 
             if (fields.length === 0) return null;
 
+            const araiNameCascade = araiSearchKind === ARAI_SEARCH_KIND_NAME
+                ? { version: 1, steps: getAraiSelectedNameCascadeSteps() }
+                : null;
+            const cascadeSummary = araiNameCascade?.steps
+                .map(step => step.label)
+                .filter(Boolean)
+                .join(" > ");
+            const genericSummary = buildSiteSearchBridgeConditionSummary(fields);
+
             return {
                 version: MLIVE_SEARCH_BRIDGE_VERSION,
                 sourceMode,
                 araiSearchKind,
                 fields,
-                summary: buildSiteSearchBridgeConditionSummary(fields),
+                araiNameCascade: araiNameCascade?.steps.length ? araiNameCascade : undefined,
+                summary: cascadeSummary ? `車名:${cascadeSummary}${genericSummary ? ` / ${genericSummary}` : ""}` : genericSummary,
                 savedAt: Date.now(),
                 sourceUrl: location.href
             };
@@ -3068,7 +3225,149 @@
             }
         }
 
-        function restoreAraiSearchBridgeCondition(condition) {
+        function findAraiNameCascadeCandidate(step) {
+            const definition = getAraiNameCascadeDefinition(step?.kind);
+            const candidateKey = getAraiNameCascadeCandidateKey(step?.candidateKey || step?.label || "");
+            if (!definition || !candidateKey) return { definition, candidates: [], allMatches: [], matches: [] };
+
+            const candidates = Array.from(document.querySelectorAll(definition.selector));
+            const allMatches = candidates.filter(candidate =>
+                getAraiNameCascadeCandidateKey(candidate.textContent || "") === candidateKey
+            );
+            const matches = allMatches.filter(candidate => isSearchBridgeElementVisible(candidate));
+            return { definition, candidates, allMatches, matches };
+        }
+
+        function isAraiNameCascadeCandidateSelected(candidate, definition) {
+            if (!candidate || !definition) return false;
+            const input = document.getElementById(definition.getInputId(candidate.id));
+            return !!input?.checked;
+        }
+
+        function resetAraiNameCascadeProgress(signature) {
+            Object.assign(araiSearchBridgeFlow, {
+                nameCascadeSignature: signature,
+                nameCascadeIndex: 0,
+                nameCascadeActionAt: 0,
+                nameCascadeActionId: "",
+                nameCascadeWaitStartedAt: 0,
+                nameCascadeLoggedIndex: -1
+            });
+        }
+
+        async function advanceAraiNameCascadeRestore(condition) {
+            const steps = getAraiNameCascadeSteps(condition);
+            if (steps.length === 0) {
+                if (hasAraiLegacyNameCascadeSelection(condition)) {
+                    await stopAraiSearchBridgeFlow("保存条件に車名選択の順序情報がありません。車名検索画面で同じ条件を保存し直してください。");
+                    return { complete: false, stopped: true };
+                }
+                return { complete: true, stopped: false };
+            }
+
+            const signature = JSON.stringify(steps.map(step => [step.kind, step.candidateKey || step.label || ""]));
+            if (araiSearchBridgeFlow.nameCascadeSignature !== signature) {
+                resetAraiNameCascadeProgress(signature);
+            }
+
+            while (araiSearchBridgeFlow.nameCascadeIndex < steps.length) {
+                const currentStep = steps[araiSearchBridgeFlow.nameCascadeIndex];
+                const match = findAraiNameCascadeCandidate(currentStep);
+                if (match.allMatches.length !== 1 || !isAraiNameCascadeCandidateSelected(match.allMatches[0], match.definition)) break;
+
+                araiSearchBridgeFlow.nameCascadeIndex += 1;
+                araiSearchBridgeFlow.nameCascadeActionAt = 0;
+                araiSearchBridgeFlow.nameCascadeActionId = "";
+                araiSearchBridgeFlow.nameCascadeWaitStartedAt = 0;
+            }
+
+            if (araiSearchBridgeFlow.nameCascadeIndex >= steps.length) {
+                recordAraiSearchBridgeLog("車名選択復元完了", { stepCount: steps.length });
+                return { complete: true, stopped: false };
+            }
+
+            const index = araiSearchBridgeFlow.nameCascadeIndex;
+            const currentStep = steps[index];
+            const match = findAraiNameCascadeCandidate(currentStep);
+            const currentLabel = currentStep.label || currentStep.kind;
+            const elapsed = araiSearchBridgeFlow.nameCascadeWaitStartedAt
+                ? Date.now() - araiSearchBridgeFlow.nameCascadeWaitStartedAt
+                : 0;
+
+            if (match.matches.length !== 1) {
+                if (!araiSearchBridgeFlow.nameCascadeWaitStartedAt) {
+                    araiSearchBridgeFlow.nameCascadeWaitStartedAt = Date.now();
+                }
+                if (araiSearchBridgeFlow.nameCascadeLoggedIndex !== index) {
+                    araiSearchBridgeFlow.nameCascadeLoggedIndex = index;
+                    recordAraiSearchBridgeLog("車名候補待機", {
+                        index,
+                        kind: currentStep.kind,
+                        label: currentLabel,
+                        candidateCount: match.candidates.length,
+                        matchCount: match.matches.length
+                    });
+                }
+                if (elapsed > ARAI_NAME_CASCADE_MAX_WAIT_MS) {
+                    await stopAraiSearchBridgeFlow(`Araiの車名候補「${currentLabel}」が表示されませんでした。検索は実行していません。`, {
+                        index,
+                        kind: currentStep.kind,
+                        candidateCount: match.candidates.length,
+                        matchCount: match.matches.length
+                    });
+                    return { complete: false, stopped: true };
+                }
+                return { complete: false, stopped: false };
+            }
+
+            const candidate = match.matches[0];
+            const actionId = `${currentStep.kind}:${candidate.id}`;
+            if (araiSearchBridgeFlow.nameCascadeActionId !== actionId) {
+                const action = runAraiKaijoSelectorAction("name_cascade_step", {
+                    payload: {
+                        kind: currentStep.kind,
+                        candidateId: candidate.id,
+                        inputId: match.definition.getInputId(candidate.id),
+                        label: currentLabel
+                    }
+                });
+                if (!action.ok) {
+                    await stopAraiSearchBridgeFlow(`Araiの車名候補「${currentLabel}」を選択できませんでした。検索は実行していません。`, {
+                        index,
+                        kind: currentStep.kind,
+                        error: action.error,
+                        diagnostic: action.diagnostic
+                    });
+                    return { complete: false, stopped: true };
+                }
+
+                araiSearchBridgeFlow.nameCascadeActionId = actionId;
+                araiSearchBridgeFlow.nameCascadeActionAt = Date.now();
+                araiSearchBridgeFlow.nameCascadeWaitStartedAt = Date.now();
+                araiSearchBridgeFlow.nameCascadeLoggedIndex = -1;
+                recordAraiSearchBridgeLog("車名候補選択", {
+                    index,
+                    kind: currentStep.kind,
+                    label: currentLabel,
+                    candidateId: candidate.id,
+                    diagnostic: action.diagnostic
+                });
+                return { complete: false, stopped: false };
+            }
+
+            if (Date.now() - araiSearchBridgeFlow.nameCascadeActionAt > ARAI_NAME_CASCADE_MAX_WAIT_MS) {
+                await stopAraiSearchBridgeFlow(`Araiの車名候補「${currentLabel}」の選択確認ができませんでした。検索は実行していません。`, {
+                    index,
+                    kind: currentStep.kind,
+                    candidateId: candidate.id
+                });
+                return { complete: false, stopped: true };
+            }
+
+            return { complete: false, stopped: false };
+        }
+
+        async function restoreAraiSearchBridgeCondition(condition) {
             const targetSearchKind = getAraiConditionSearchKind(condition);
             const savedNameKeyword = getAraiSavedNameSearchKeyword(condition);
             const readiness = getAraiSearchBridgeRestoreReadiness(condition);
@@ -3092,9 +3391,15 @@
                 return false;
             }
 
+            if (targetSearchKind === ARAI_SEARCH_KIND_NAME) {
+                const cascade = await advanceAraiNameCascadeRestore(condition);
+                if (!cascade.complete) return false;
+            }
+
             let restoredCount = 0;
             for (const record of condition.fields || []) {
                 if (!isAraiFieldCompatibleWithSearchKind(record, targetSearchKind)) continue;
+                if (targetSearchKind === ARAI_SEARCH_KIND_NAME && isAraiNameCascadeFieldRecord(record)) continue;
 
                 const target = findAraiSearchBridgeControl(record, targetSearchKind);
                 if (!target) continue;
@@ -3363,15 +3668,24 @@
             root.setAttribute(ARAI_KAIJO_ACTION_ATTR, action);
             root.setAttribute(ARAI_KAIJO_RESULT_ATTR, "0");
             root.setAttribute(ARAI_KAIJO_PROBE_ONLY_ATTR, options.probeOnly ? "1" : "0");
+            if (options.payload !== undefined) {
+                root.setAttribute(ARAI_KAIJO_PAYLOAD_ATTR, JSON.stringify(options.payload));
+            } else {
+                root.removeAttribute(ARAI_KAIJO_PAYLOAD_ATTR);
+            }
             root.removeAttribute(ARAI_KAIJO_ERROR_ATTR);
             root.removeAttribute(ARAI_KAIJO_DIAGNOSTIC_ATTR);
-            window.dispatchEvent(new CustomEvent(ARAI_KAIJO_ACTION_EVENT));
+            try {
+                window.dispatchEvent(new CustomEvent(ARAI_KAIJO_ACTION_EVENT));
 
-            return {
-                ok: root.getAttribute(ARAI_KAIJO_RESULT_ATTR) === "1",
-                error: root.getAttribute(ARAI_KAIJO_ERROR_ATTR) || "",
-                diagnostic: parseAraiKaijoDiagnostic()
-            };
+                return {
+                    ok: root.getAttribute(ARAI_KAIJO_RESULT_ATTR) === "1",
+                    error: root.getAttribute(ARAI_KAIJO_ERROR_ATTR) || "",
+                    diagnostic: parseAraiKaijoDiagnostic()
+                };
+            } finally {
+                root.removeAttribute(ARAI_KAIJO_PAYLOAD_ATTR);
+            }
         }
 
         function waitForAraiBridgeDelay(ms) {
@@ -3658,6 +3972,7 @@
 
         async function handleAraiPendingBeforeRestore(pending, currentMode) {
             ensureAraiSearchBridgeFlow(pending);
+            if (araiSearchBridgeFlow.stopped) return true;
             const targetSearchKind = getAraiConditionSearchKind(pending?.condition);
 
             if (isAraiVenueSelectionStep(pending?.condition, currentMode)) {
@@ -3833,7 +4148,7 @@
                 storageKey: ARAI_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: ARAI_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "arai-search-bridge-ui",
-                buildId: "arai-cascade-diagnostic-20260710",
+                buildId: "arai-name-cascade-20260710",
                 position: { right: "12px", top: "132px" },
                 launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.arai,
