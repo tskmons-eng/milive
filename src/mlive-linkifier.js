@@ -4537,6 +4537,11 @@
             return !!button && !button.disabled && button.getAttribute("aria-disabled") !== "true";
         }
 
+        function clickJuSelectionCascadeElement(element) {
+            // JU's modal advances selection from its pointer sequence, not a bare HTMLElement.click().
+            return clickSearchBridgeElement(element, true);
+        }
+
         async function restoreJuSelectionCascade(cascade, targetMode) {
             const form = getJuSearchBridgeForm(targetMode);
             const prefix = getJuSearchBridgeTargetPrefix(targetMode);
@@ -4547,7 +4552,7 @@
 
             const opener = document.getElementById(`${prefix}Maker_CarName`) ||
                 form.querySelector("[id$='-Maker_CarName']");
-            if (!clickSearchBridgeElement(opener)) return false;
+            if (!clickJuSelectionCascadeElement(opener)) return false;
 
             let popup = await wait(getJuSelectionCascadePopup);
             if (!popup) return false;
@@ -4555,11 +4560,11 @@
             for (const car of cascade.cars) {
                 const maker = await wait(() => findJuSelectionCascadeMaker(getJuSelectionCascadePopup(), car.maker));
                 const makerTarget = maker?.querySelector("[id$='-b4-Content']") || maker;
-                if (!clickSearchBridgeElement(makerTarget)) return false;
+                if (!clickJuSelectionCascadeElement(makerTarget)) return false;
 
                 const carInput = await wait(() => findJuSelectionCascadeCheckbox(getJuSelectionCascadePopup(), "CarNameCheckbox", car.car));
                 if (!carInput) return false;
-                if (!carInput.checked && !clickSearchBridgeElement(carInput)) return false;
+                if (!carInput.checked && !clickJuSelectionCascadeElement(carInput)) return false;
 
                 const selectedCar = await wait(() => {
                     const current = findJuSelectionCascadeCheckbox(getJuSelectionCascadePopup(), "CarNameCheckbox", car.car);
@@ -4574,7 +4579,7 @@
                     const button = findVisibleSearchBridgeButtonByText("型式・グレード選択へ", getJuSelectionCascadePopup() || document);
                     return isJuSelectionCascadeButtonEnabled(button) ? button : null;
                 });
-                if (!clickSearchBridgeElement(next)) return false;
+                if (!clickJuSelectionCascadeElement(next)) return false;
 
                 popup = await wait(() => getJuSelectionCascadeCheckboxes(getJuSelectionCascadePopup(), "Checkbox3").length > 0
                     ? getJuSelectionCascadePopup()
@@ -4585,7 +4590,7 @@
                     for (const grade of car.grades) {
                         const gradeInput = await wait(() => findJuSelectionCascadeCheckbox(getJuSelectionCascadePopup(), "Checkbox3", grade));
                         if (!gradeInput) return false;
-                        if (!gradeInput.checked && !clickSearchBridgeElement(gradeInput)) return false;
+                        if (!gradeInput.checked && !clickJuSelectionCascadeElement(gradeInput)) return false;
 
                         const selectedGrade = await wait(() => {
                             const current = findJuSelectionCascadeCheckbox(getJuSelectionCascadePopup(), "Checkbox3", grade);
@@ -4600,7 +4605,7 @@
                 const button = findVisibleSearchBridgeButtonByText("確定して閉じる", getJuSelectionCascadePopup() || document);
                 return isJuSelectionCascadeButtonEnabled(button) ? button : null;
             });
-            if (!clickSearchBridgeElement(close)) return false;
+            if (!clickJuSelectionCascadeElement(close)) return false;
 
             return !!await wait(() => !getJuSelectionCascadePopup());
         }
