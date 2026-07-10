@@ -267,6 +267,7 @@
         const ARAI_SEARCH_BRIDGE_LOG_KEY = "araiSearchBridgeDebugLog";
         const ARAI_SEARCH_BRIDGE_RUN_KEY = "araiSearchBridgeRunState";
         const ARAI_NAME_DIAGNOSTIC_KEY = "araiNameCascadeDiagnostic";
+        const JU_SELECTION_DIAGNOSTIC_KEY = "juSelectionCascadeDiagnostic";
         const ARAI_PENDING_FALLBACK_ATTR = "data-mlive-arai-pending-fallback";
         const ARAI_PENDING_FALLBACK_COMMAND_ATTR = "data-mlive-arai-pending-fallback-command";
         const ARAI_PENDING_FALLBACK_RESULT_ATTR = "data-mlive-arai-pending-fallback-result";
@@ -276,10 +277,12 @@
         const ARAI_NAME_DIAGNOSTIC_RESULT_ATTR = "data-mlive-arai-name-diagnostic-result";
         const ARAI_NAME_DIAGNOSTIC_ALERT_ATTR = "data-mlive-arai-name-diagnostic-alert";
         const ARAI_NAME_DIAGNOSTIC_SUMMARY_ATTR = "data-mlive-arai-name-diagnostic-summary";
+        const JU_SELECTION_DIAGNOSTIC_SUMMARY_ATTR = "data-mlive-ju-selection-diagnostic-summary";
         const ARAI_NAME_DIAGNOSTIC_EVENT = "mlive-linkifier:arai-name-diagnostic";
         const ARAI_NAME_DIAGNOSTIC_ALERT_EVENT = "mlive-linkifier:arai-name-diagnostic-alert";
         const ARAI_SEARCH_BRIDGE_LOG_LIMIT = 80;
         const ARAI_NAME_DIAGNOSTIC_STEP_LIMIT = 60;
+        const JU_SELECTION_DIAGNOSTIC_STEP_LIMIT = 80;
         const SEARCH_BRIDGE_PENDING_MAX_AGE_MS = 10 * 60 * 1000;
         const JU_SEARCH_BRIDGE_SLOTS_KEY = "juSearchBridgeSlots";
         const JU_SEARCH_BRIDGE_PENDING_KEY = "juSearchBridgePending";
@@ -2111,6 +2114,12 @@
         let araiNameDiagnosticSnapshotSignature = "";
         let araiNameDiagnosticAlertValue = "";
         let araiNameDiagnosticWriteQueue = Promise.resolve();
+        let juSelectionDiagnosticRecord = null;
+        let juSelectionDiagnosticObserver = null;
+        let juSelectionDiagnosticMutationTimer = null;
+        let juSelectionDiagnosticSnapshotSignature = "";
+        let juSelectionDiagnosticWriteQueue = Promise.resolve();
+        let juSelectionDiagnosticInitialized = false;
 
         function getAraiNameDiagnosticTarget(target) {
             const element = target?.nodeType === 1 ? target : target?.parentElement;
@@ -4211,6 +4220,347 @@
 
         // ===== JU 検索条件ブリッジ =====
 
+        function getJuSelectionDiagnosticRelevantSelector() {
+            return "#b3-Form,#b4-Form,#b5-Form,[id^='b3-'],[id^='b4-'],[id^='b5-'],dialog,[role='dialog'],[aria-modal='true'],[class*='modal'],[class*='popup'],[class*='dialog']";
+        }
+
+        function getJuSelectionDiagnosticOverlaySelector() {
+            return "dialog,[role='dialog'],[aria-modal='true'],[class*='modal'],[class*='popup'],[class*='dialog']";
+        }
+
+        function isJuSelectionDiagnosticOwnUi(element) {
+            return !!element?.closest?.("#ju-search-bridge-ui");
+        }
+
+        function getJuSelectionDiagnosticTarget(target) {
+            const element = target?.nodeType === 1 ? target : target?.parentElement;
+            if (!element || isJuSelectionDiagnosticOwnUi(element)) return null;
+
+            const control = element.closest("button,a,input,select,textarea,label,li,[role='option'],[role='button']") || element;
+            if (isJuSelectionDiagnosticOwnUi(control)) return null;
+
+            const scope = control.closest(getJuSelectionDiagnosticRelevantSelector());
+            const selectedTexts = control.tagName === "SELECT"
+                ? Array.from(control.selectedOptions || [])
+                    .map(option => normalizeSearchBridgeText(option.textContent || option.value || ""))
+                    .filter(Boolean)
+                    .slice(0, 8)
+                : [];
+
+            return {
+                tag: String(control.tagName || "").toLowerCase(),
+                id: control.id || "",
+                name: control.name || "",
+                type: control.type || "",
+                value: "value" in control ? String(control.value || "").slice(0, 160) : "",
+                checked: "checked" in control ? !!control.checked : null,
+                selectedTexts,
+                text: normalizeSearchBridgeText(control.innerText || control.textContent || "").slice(0, 160),
+                scope: scope?.id || scope?.getAttribute?.("role") || ""
+            };
+        }
+
+        function isJuSelectionDiagnosticRelevantTarget(target) {
+            const element = target?.nodeType === 1 ? target : target?.parentElement;
+            if (!element || isJuSelectionDiagnosticOwnUi(element)) return false;
+
+            return !!element.closest(getJuSelectionDiagnosticRelevantSelector());
+        }
+
+        function getJuSelectionDiagnosticCandidateTexts(root) {
+            if (!root) return [];
+
+            const seen = new Set();
+            return Array.from(root.querySelectorAll("button,a,label,li,[role='option'],[role='button'],input[type='checkbox'],input[type='radio']"))
+                .filter(element => isSearchBridgeElementVisible(element) && !isJuSelectionDiagnosticOwnUi(element))
+                .map(element => normalizeSearchBridgeText(element.innerText || element.textContent || element.value || ""))
+                .filter(text => text && text.length <= 160 && !seen.has(text) && (seen.add(text), true))
+                .slice(0, 20);
+        }
+
+        function getJuSelectionDiagnosticSnapshot() {
+            const controlSelector = "#b3-Form input,#b3-Form select,#b3-Form textarea,#b4-Form input,#b4-Form select,#b4-Form textarea,#b5-Form input,#b5-Form select,#b5-Form textarea";
+            const overlaySelector = getJuSelectionDiagnosticOverlaySelector();
+            const controls = Array.from(document.querySelectorAll(controlSelector))
+                .filter(element => isSearchBridgeElementVisible(element))
+                .map(element => getJuSelectionDiagnosticTarget(element))
+                .filter(Boolean);
+            const overlays = Array.from(document.querySelectorAll(overlaySelector))
+                .filter(element => isSearchBridgeElementVisible(element) && !isJuSelectionDiagnosticOwnUi(element))
+                .filter(element => !element.parentElement?.closest(overlaySelector))
+                .slice(0, 8)
+                .map(element => ({
+                    tag: String(element.tagName || "").toLowerCase(),
+                    id: element.id || "",
+                    className: String(element.className || "").slice(0, 160),
+                    title: normalizeSearchBridgeText(element.querySelector("h1,h2,h3,h4,h5,.title,[data-title]")?.textContent || "").slice(0, 120),
+                    candidates: getJuSelectionDiagnosticCandidateTexts(element)
+                }));
+            const actionButtons = Array.from(document.querySelectorAll("#b3-Form button,#b4-Form button,#b5-Form button"))
+                .filter(element => isSearchBridgeElementVisible(element))
+                .map(element => ({
+                    id: element.id || "",
+                    text: normalizeSearchBridgeText(element.innerText || element.textContent || "").slice(0, 120),
+                    disabled: !!element.disabled
+                }))
+                .filter(button => button.text || button.id)
+                .slice(0, 20);
+            const alerts = Array.from(document.querySelectorAll("[role='alert'],.alert,[class*='alert']"))
+                .filter(element => isSearchBridgeElementVisible(element) && !isJuSelectionDiagnosticOwnUi(element))
+                .map(element => normalizeSearchBridgeText(element.innerText || element.textContent || ""))
+                .filter(Boolean)
+                .slice(0, 8);
+
+            return {
+                url: location.href,
+                mode: getJuSearchBridgeMode(),
+                formId: getJuSearchBridgeForm(getJuSearchBridgeMode())?.id || "",
+                controls,
+                overlays,
+                actionButtons,
+                alerts
+            };
+        }
+
+        function getJuSelectionDiagnosticSnapshotSignature(snapshot = getJuSelectionDiagnosticSnapshot()) {
+            return JSON.stringify(snapshot);
+        }
+
+        function getJuSelectionDiagnosticSummary(record = juSelectionDiagnosticRecord) {
+            const steps = Array.isArray(record?.steps) ? record.steps : [];
+            const last = steps.at(-1) || null;
+            return {
+                version: record?.version || 1,
+                status: record?.status || "empty",
+                startedAt: record?.startedAt || 0,
+                updatedAt: record?.updatedAt || 0,
+                stepCount: steps.length,
+                lastKind: last?.kind || "",
+                lastTarget: last?.detail?.target || null,
+                lastSnapshot: last?.snapshot || null
+            };
+        }
+
+        function publishJuSelectionDiagnosticSummary(record = juSelectionDiagnosticRecord) {
+            const root = document.documentElement;
+            if (!root) return;
+
+            try {
+                root.setAttribute(JU_SELECTION_DIAGNOSTIC_SUMMARY_ATTR, JSON.stringify(getJuSelectionDiagnosticSummary(record)));
+            } catch {
+                root.removeAttribute(JU_SELECTION_DIAGNOSTIC_SUMMARY_ATTR);
+            }
+        }
+
+        function cloneJuSelectionDiagnosticRecord(record) {
+            return JSON.parse(JSON.stringify(record));
+        }
+
+        function queueJuSelectionDiagnosticWrite(record = juSelectionDiagnosticRecord) {
+            const storage = getSiteSearchBridgeLocalStorage();
+            if (!storage || !record) return Promise.resolve();
+
+            const snapshot = cloneJuSelectionDiagnosticRecord(record);
+            juSelectionDiagnosticWriteQueue = juSelectionDiagnosticWriteQueue
+                .catch(() => undefined)
+                .then(() => storage.set({ [JU_SELECTION_DIAGNOSTIC_KEY]: snapshot }))
+                .catch(error => {
+                    if (!/extension context invalidated/i.test(String(error?.message || error))) {
+                        console.warn("MLive Linkifier: JU selection diagnostic write failed", error);
+                    }
+                });
+            return juSelectionDiagnosticWriteQueue;
+        }
+
+        async function getJuSelectionDiagnosticRecord() {
+            const storage = getSiteSearchBridgeLocalStorage();
+            if (!storage) return null;
+
+            const result = await storage.get(JU_SELECTION_DIAGNOSTIC_KEY);
+            const record = result[JU_SELECTION_DIAGNOSTIC_KEY];
+            return record && typeof record === "object" ? record : null;
+        }
+
+        function recordJuSelectionDiagnosticStep(kind, detail = {}) {
+            const record = juSelectionDiagnosticRecord;
+            if (!record || record.status !== "recording") return;
+
+            const snapshot = getJuSelectionDiagnosticSnapshot();
+            const signature = getJuSelectionDiagnosticSnapshotSignature(snapshot);
+            if (kind === "dom_update" && signature === juSelectionDiagnosticSnapshotSignature) return;
+
+            juSelectionDiagnosticSnapshotSignature = signature;
+            record.steps.push({
+                sequence: Number(record.nextSequence || 1),
+                at: Date.now(),
+                kind,
+                detail,
+                snapshot
+            });
+            record.nextSequence = Number(record.nextSequence || 1) + 1;
+            if (record.steps.length > JU_SELECTION_DIAGNOSTIC_STEP_LIMIT) {
+                record.steps.splice(0, record.steps.length - JU_SELECTION_DIAGNOSTIC_STEP_LIMIT);
+            }
+            record.updatedAt = Date.now();
+            publishJuSelectionDiagnosticSummary(record);
+            void queueJuSelectionDiagnosticWrite(record);
+        }
+
+        function isJuSelectionDiagnosticMutationRelevant(mutations) {
+            const selector = getJuSelectionDiagnosticRelevantSelector();
+
+            return mutations.some(mutation => {
+                const target = mutation.target?.nodeType === 1 ? mutation.target : mutation.target?.parentElement;
+                if (target?.closest?.(selector) && !isJuSelectionDiagnosticOwnUi(target)) return true;
+
+                return Array.from(mutation.addedNodes || []).some(node => {
+                    const element = node?.nodeType === 1 ? node : node?.parentElement;
+                    if (!element || isJuSelectionDiagnosticOwnUi(element)) return false;
+                    return !!(element.matches?.(selector) || element.querySelector?.(selector));
+                });
+            });
+        }
+
+        function scheduleJuSelectionDiagnosticMutationRecord() {
+            if (juSelectionDiagnosticMutationTimer) clearTimeout(juSelectionDiagnosticMutationTimer);
+            juSelectionDiagnosticMutationTimer = setTimeout(() => {
+                juSelectionDiagnosticMutationTimer = null;
+                recordJuSelectionDiagnosticStep("dom_update");
+            }, 120);
+        }
+
+        function handleJuSelectionDiagnosticClick(event) {
+            if (!event.isTrusted || !isJuSelectionDiagnosticRelevantTarget(event.target)) return;
+            recordJuSelectionDiagnosticStep("user_click", { target: getJuSelectionDiagnosticTarget(event.target) });
+        }
+
+        function handleJuSelectionDiagnosticChange(event) {
+            if (!event.isTrusted || !isJuSelectionDiagnosticRelevantTarget(event.target)) return;
+            recordJuSelectionDiagnosticStep("user_change", { target: getJuSelectionDiagnosticTarget(event.target) });
+        }
+
+        function handleJuSelectionDiagnosticInput(event) {
+            if (!event.isTrusted || !isJuSelectionDiagnosticRelevantTarget(event.target)) return;
+            recordJuSelectionDiagnosticStep("user_input", { target: getJuSelectionDiagnosticTarget(event.target) });
+        }
+
+        function installJuSelectionDiagnosticListeners() {
+            document.addEventListener("click", handleJuSelectionDiagnosticClick, true);
+            document.addEventListener("change", handleJuSelectionDiagnosticChange, true);
+            document.addEventListener("input", handleJuSelectionDiagnosticInput, true);
+
+            juSelectionDiagnosticObserver = new MutationObserver(mutations => {
+                if (isJuSelectionDiagnosticMutationRelevant(mutations)) scheduleJuSelectionDiagnosticMutationRecord();
+            });
+            juSelectionDiagnosticObserver.observe(document.documentElement, {
+                subtree: true,
+                childList: true,
+                attributes: true,
+                attributeFilter: ["class", "style", "value", "checked", "selected", "aria-selected", "aria-checked", "aria-expanded"]
+            });
+        }
+
+        function removeJuSelectionDiagnosticListeners() {
+            document.removeEventListener("click", handleJuSelectionDiagnosticClick, true);
+            document.removeEventListener("change", handleJuSelectionDiagnosticChange, true);
+            document.removeEventListener("input", handleJuSelectionDiagnosticInput, true);
+            juSelectionDiagnosticObserver?.disconnect();
+            juSelectionDiagnosticObserver = null;
+            if (juSelectionDiagnosticMutationTimer) clearTimeout(juSelectionDiagnosticMutationTimer);
+            juSelectionDiagnosticMutationTimer = null;
+        }
+
+        async function startJuSelectionDiagnostic() {
+            const mode = getJuSearchBridgeMode();
+            if (!isJuSearchBridgeMode(mode) || !getJuSearchBridgeForm(mode)) {
+                showSiteSearchBridgeNotice(getJuSearchBridgeAdapter(), "JUの検索画面で開始してください", "error");
+                return false;
+            }
+            if (!getSiteSearchBridgeLocalStorage()) {
+                showSiteSearchBridgeNotice(getJuSearchBridgeAdapter(), "拡張更新後の古いページです。ページを再読み込みしてください", "error");
+                return false;
+            }
+
+            removeJuSelectionDiagnosticListeners();
+            const now = Date.now();
+            juSelectionDiagnosticSnapshotSignature = "";
+            juSelectionDiagnosticRecord = {
+                version: 1,
+                status: "recording",
+                startedAt: now,
+                updatedAt: now,
+                sourceMode: mode,
+                sourceUrl: location.href,
+                nextSequence: 1,
+                steps: []
+            };
+            juSelectionDiagnosticInitialized = true;
+            installJuSelectionDiagnosticListeners();
+            recordJuSelectionDiagnosticStep("recording_started");
+            await queueJuSelectionDiagnosticWrite(juSelectionDiagnosticRecord);
+            return true;
+        }
+
+        async function stopJuSelectionDiagnostic() {
+            const record = juSelectionDiagnosticRecord || await getJuSelectionDiagnosticRecord();
+            if (!record) return null;
+
+            juSelectionDiagnosticRecord = record;
+            recordJuSelectionDiagnosticStep("recording_finished");
+            record.status = "stopped";
+            record.updatedAt = Date.now();
+            removeJuSelectionDiagnosticListeners();
+            publishJuSelectionDiagnosticSummary(record);
+            await queueJuSelectionDiagnosticWrite(record);
+            return record;
+        }
+
+        async function initializeJuSelectionDiagnostic() {
+            if (juSelectionDiagnosticInitialized) return;
+            juSelectionDiagnosticInitialized = true;
+
+            try {
+                const record = await getJuSelectionDiagnosticRecord();
+                if (record?.status !== "recording" || !isJuSearchBridgeMode(getJuSearchBridgeMode())) return;
+
+                juSelectionDiagnosticRecord = record;
+                juSelectionDiagnosticSnapshotSignature = "";
+                installJuSelectionDiagnosticListeners();
+                recordJuSelectionDiagnosticStep("page_loaded");
+            } catch (error) {
+                if (!/extension context invalidated/i.test(String(error?.message || error))) {
+                    console.warn("MLive Linkifier: JU selection diagnostic startup failed", error);
+                }
+            }
+        }
+
+        function createJuSelectionDiagnosticPanelAction(wrap, adapter) {
+            const button = createSiteSearchBridgeButton("選択記録", async () => {
+                button.disabled = true;
+                try {
+                    const record = juSelectionDiagnosticRecord || await getJuSelectionDiagnosticRecord();
+                    if (record?.status === "recording") {
+                        const stopped = await stopJuSelectionDiagnostic();
+                        showSiteSearchBridgeNotice(adapter, `JU選択記録を終了しました (${stopped?.steps?.length || 0}件)`);
+                    } else if (await startJuSelectionDiagnostic()) {
+                        showSiteSearchBridgeNotice(adapter, "JU選択記録を開始しました");
+                    }
+                    await renderSiteSearchBridgePanel(wrap, adapter);
+                } finally {
+                    button.disabled = false;
+                }
+            });
+
+            void getJuSelectionDiagnosticRecord()
+                .then(record => {
+                    const isRecording = record?.status === "recording";
+                    button.textContent = isRecording ? "記録終了" : "選択記録";
+                    button.title = isRecording ? "JUの選択記録を終了" : "JUの選択記録を開始";
+                })
+                .catch(() => undefined);
+            return button;
+        }
+
         function getNormalizedJuSearchBridgePath() {
             return location.pathname.toLowerCase().replace(/\/+$/, "");
         }
@@ -4491,6 +4841,9 @@
                 launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.ju,
                 targetModes: ["listing", "market"],
+                appendPanelActions: (headerActions, wrap, adapter) => {
+                    headerActions.appendChild(createJuSelectionDiagnosticPanelAction(wrap, adapter));
+                },
                 shouldInstall: shouldInstallJuSearchBridge,
                 getCurrentMode: getJuSearchBridgeMode,
                 getModeLabel: getJuSearchBridgeModeLabel,
@@ -4515,6 +4868,7 @@
             const adapter = getJuSearchBridgeAdapter();
             installSiteSearchBridge(adapter);
             applySiteSearchBridgePending(adapter);
+            void initializeJuSelectionDiagnostic();
         }
 
         // MLive用 自動選択ロジック
