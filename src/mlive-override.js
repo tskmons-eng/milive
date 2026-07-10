@@ -13,6 +13,13 @@
         const ARAI_PENDING_FALLBACK_RESULT_ATTR = "data-mlive-arai-pending-fallback-result";
         const ARAI_PENDING_FALLBACK_STORAGE_KEY = "mliveLinkifierAraiSearchBridgePendingFallback";
         const ARAI_PENDING_FALLBACK_EVENT = "mlive-linkifier:arai-pending-fallback";
+        const ARAI_NAME_DIAGNOSTIC_ACTIVE_ATTR = "data-mlive-arai-name-diagnostic-active";
+        const ARAI_NAME_DIAGNOSTIC_COMMAND_ATTR = "data-mlive-arai-name-diagnostic-command";
+        const ARAI_NAME_DIAGNOSTIC_RESULT_ATTR = "data-mlive-arai-name-diagnostic-result";
+        const ARAI_NAME_DIAGNOSTIC_ALERT_ATTR = "data-mlive-arai-name-diagnostic-alert";
+        const ARAI_NAME_DIAGNOSTIC_EVENT = "mlive-linkifier:arai-name-diagnostic";
+        const ARAI_NAME_DIAGNOSTIC_ALERT_EVENT = "mlive-linkifier:arai-name-diagnostic-alert";
+        let araiNameDiagnosticOriginalAlert = null;
 
         const publishAraiPendingFallback = () => {
             const root = document.documentElement;
@@ -65,6 +72,55 @@
         } else {
             document.addEventListener("DOMContentLoaded", publishAraiPendingFallback, { once: true });
         }
+
+        const stopAraiNameDiagnosticAlertCapture = () => {
+            if (araiNameDiagnosticOriginalAlert) {
+                window.alert = araiNameDiagnosticOriginalAlert;
+                araiNameDiagnosticOriginalAlert = null;
+            }
+        };
+
+        const startAraiNameDiagnosticAlertCapture = () => {
+            if (araiNameDiagnosticOriginalAlert) return;
+
+            araiNameDiagnosticOriginalAlert = window.alert;
+            window.alert = function (message) {
+                const root = document.documentElement;
+                try {
+                    if (root?.getAttribute(ARAI_NAME_DIAGNOSTIC_ACTIVE_ATTR) === "1") {
+                        root.setAttribute(ARAI_NAME_DIAGNOSTIC_ALERT_ATTR, String(message || "").slice(0, 300));
+                        window.dispatchEvent(new Event(ARAI_NAME_DIAGNOSTIC_ALERT_EVENT));
+                    }
+                } catch (error) {
+                    console.warn("MLive Linkifier: Arai diagnostic alert capture failed", error);
+                }
+
+                return araiNameDiagnosticOriginalAlert.apply(this, arguments);
+            };
+        };
+
+        const handleAraiNameDiagnosticCommand = () => {
+            const root = document.documentElement;
+            if (!root) return;
+
+            const command = root.getAttribute(ARAI_NAME_DIAGNOSTIC_COMMAND_ATTR) || "";
+            try {
+                if (command === "start") {
+                    startAraiNameDiagnosticAlertCapture();
+                } else if (command === "stop" || command === "clear") {
+                    stopAraiNameDiagnosticAlertCapture();
+                    if (command === "clear") root.removeAttribute(ARAI_NAME_DIAGNOSTIC_ALERT_ATTR);
+                }
+                root.setAttribute(ARAI_NAME_DIAGNOSTIC_RESULT_ATTR, "1");
+            } catch (error) {
+                root.setAttribute(ARAI_NAME_DIAGNOSTIC_RESULT_ATTR, "0");
+                console.warn("MLive Linkifier: Arai diagnostic command failed", error);
+            } finally {
+                root.removeAttribute(ARAI_NAME_DIAGNOSTIC_COMMAND_ATTR);
+            }
+        };
+
+        window.addEventListener(ARAI_NAME_DIAGNOSTIC_EVENT, handleAraiNameDiagnosticCommand);
 
         const isVisible = (el) => {
             if (!el) return false;

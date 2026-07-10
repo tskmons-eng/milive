@@ -266,11 +266,20 @@
         const ARAI_SEARCH_BRIDGE_PENDING_KEY = "araiSearchBridgePending";
         const ARAI_SEARCH_BRIDGE_LOG_KEY = "araiSearchBridgeDebugLog";
         const ARAI_SEARCH_BRIDGE_RUN_KEY = "araiSearchBridgeRunState";
+        const ARAI_NAME_DIAGNOSTIC_KEY = "araiNameCascadeDiagnostic";
         const ARAI_PENDING_FALLBACK_ATTR = "data-mlive-arai-pending-fallback";
         const ARAI_PENDING_FALLBACK_COMMAND_ATTR = "data-mlive-arai-pending-fallback-command";
         const ARAI_PENDING_FALLBACK_RESULT_ATTR = "data-mlive-arai-pending-fallback-result";
         const ARAI_PENDING_FALLBACK_EVENT = "mlive-linkifier:arai-pending-fallback";
+        const ARAI_NAME_DIAGNOSTIC_ACTIVE_ATTR = "data-mlive-arai-name-diagnostic-active";
+        const ARAI_NAME_DIAGNOSTIC_COMMAND_ATTR = "data-mlive-arai-name-diagnostic-command";
+        const ARAI_NAME_DIAGNOSTIC_RESULT_ATTR = "data-mlive-arai-name-diagnostic-result";
+        const ARAI_NAME_DIAGNOSTIC_ALERT_ATTR = "data-mlive-arai-name-diagnostic-alert";
+        const ARAI_NAME_DIAGNOSTIC_SUMMARY_ATTR = "data-mlive-arai-name-diagnostic-summary";
+        const ARAI_NAME_DIAGNOSTIC_EVENT = "mlive-linkifier:arai-name-diagnostic";
+        const ARAI_NAME_DIAGNOSTIC_ALERT_EVENT = "mlive-linkifier:arai-name-diagnostic-alert";
         const ARAI_SEARCH_BRIDGE_LOG_LIMIT = 80;
+        const ARAI_NAME_DIAGNOSTIC_STEP_LIMIT = 60;
         const SEARCH_BRIDGE_PENDING_MAX_AGE_MS = 10 * 60 * 1000;
         const JU_SEARCH_BRIDGE_SLOTS_KEY = "juSearchBridgeSlots";
         const JU_SEARCH_BRIDGE_PENDING_KEY = "juSearchBridgePending";
@@ -1587,6 +1596,10 @@
                 header.appendChild(headerActions);
                 wrap.appendChild(header);
 
+                if (typeof adapter.appendPanelContent === "function") {
+                    await adapter.appendPanelContent(wrap, adapter);
+                }
+
                 for (const slot of store.slots) {
                     wrap.appendChild(createSiteSearchBridgeSlotRow(wrap, adapter, slot));
                 }
@@ -2065,6 +2078,405 @@
 
         let araiResultCheckRunning = false;
         let araiPendingFallbackStartupRetryScheduled = false;
+        let araiNameDiagnosticRecord = null;
+        let araiNameDiagnosticObserver = null;
+        let araiNameDiagnosticMutationTimer = null;
+        let araiNameDiagnosticSnapshotSignature = "";
+        let araiNameDiagnosticAlertValue = "";
+        let araiNameDiagnosticWriteQueue = Promise.resolve();
+
+        function getAraiNameDiagnosticTarget(target) {
+            const element = target?.nodeType === 1 ? target : target?.parentElement;
+            if (!element) return null;
+
+            const control = element.closest("button,a,input,select,textarea,label,li,span") || element;
+            const scope = control.closest("[id^='s1_'],#tbCarNameList,#tbGradeList,#search_box,#tabclient0,#tabclient1,#tabclient2,#tabclient3");
+            return {
+                tag: String(control.tagName || "").toLowerCase(),
+                id: control.id || "",
+                name: control.name || "",
+                type: control.type || "",
+                value: "value" in control ? String(control.value || "").slice(0, 120) : "",
+                text: normalizeSearchBridgeText(control.innerText || control.textContent || "").slice(0, 120),
+                scope: scope?.id || ""
+            };
+        }
+
+        function isAraiNameDiagnosticRelevantTarget(target) {
+            const element = target?.nodeType === 1 ? target : target?.parentElement;
+            return !!element?.closest("[id^='s1_'],#tbCarNameList,#tbGradeList,#search_box,#tabclient0,#tabclient1,#tabclient2,#tabclient3");
+        }
+
+        function getAraiNameDiagnosticCandidateTexts(root) {
+            if (!root) return [];
+
+            const seen = new Set();
+            return Array.from(root.querySelectorAll("a,button,label,li,span,input[type='checkbox'],input[type='radio']"))
+                .filter(el => isSearchBridgeElementVisible(el))
+                .map(el => normalizeSearchBridgeText(el.innerText || el.textContent || el.value || ""))
+                .filter(text => text && text.length <= 120 && !seen.has(text) && (seen.add(text), true))
+                .slice(0, 16);
+        }
+
+        function getAraiNameDiagnosticSnapshot() {
+            const visibleDialogs = Array.from(document.querySelectorAll("[id^='s1_']"))
+                .filter(el => /^s1_\d+$/i.test(el.id || "") && isSearchBridgeElementVisible(el))
+                .map(el => ({
+                    id: el.id,
+                    title: normalizeSearchBridgeText(el.querySelector("h1,h2,h3,h4,h5,.title,#gTitle")?.textContent || "").slice(0, 80),
+                    candidates: getAraiNameDiagnosticCandidateTexts(el)
+                }));
+            const candidateLists = Array.from(document.querySelectorAll("#tbCarNameList,#tbGradeList,[id^='s1_'] [id$='List']"))
+                .filter((el, index, all) => all.indexOf(el) === index && isSearchBridgeElementVisible(el))
+                .map(el => ({ id: el.id || "", candidates: getAraiNameDiagnosticCandidateTexts(el) }));
+            const nameInput = document.getElementById("history_check") || document.querySelector("input[name='pattern']");
+            const activeNameTab = getAraiSearchKindTabId(getAraiSearchBridgeMode(), ARAI_SEARCH_KIND_NAME);
+
+            return {
+                url: location.href,
+                mode: getAraiSearchBridgeMode(),
+                activeNameTab: isAraiSearchKindTabActive(activeNameTab),
+                keyword: normalizeSearchBridgeText(nameInput?.value || "").slice(0, 120),
+                dialogs: visibleDialogs,
+                candidateLists,
+                selectedVenueCount: getAraiCheckedVenueCount()
+            };
+        }
+
+        function getAraiNameDiagnosticSnapshotSignature(snapshot = getAraiNameDiagnosticSnapshot()) {
+            return JSON.stringify({
+                mode: snapshot.mode,
+                activeNameTab: snapshot.activeNameTab,
+                keyword: snapshot.keyword,
+                dialogs: snapshot.dialogs,
+                candidateLists: snapshot.candidateLists,
+                selectedVenueCount: snapshot.selectedVenueCount
+            });
+        }
+
+        function getAraiNameDiagnosticSummary(record = araiNameDiagnosticRecord) {
+            const steps = Array.isArray(record?.steps) ? record.steps : [];
+            const last = steps.at(-1) || null;
+            return {
+                version: record?.version || 1,
+                status: record?.status || "empty",
+                startedAt: record?.startedAt || 0,
+                updatedAt: record?.updatedAt || 0,
+                stepCount: steps.length,
+                lastKind: last?.kind || "",
+                lastTarget: last?.detail?.target || null,
+                lastSnapshot: last?.snapshot || null
+            };
+        }
+
+        function publishAraiNameDiagnosticSummary(record = araiNameDiagnosticRecord) {
+            const root = document.documentElement;
+            if (!root) return;
+
+            try {
+                root.setAttribute(ARAI_NAME_DIAGNOSTIC_SUMMARY_ATTR, JSON.stringify(getAraiNameDiagnosticSummary(record)));
+            } catch {
+                root.removeAttribute(ARAI_NAME_DIAGNOSTIC_SUMMARY_ATTR);
+            }
+        }
+
+        function cloneAraiNameDiagnosticRecord(record) {
+            return JSON.parse(JSON.stringify(record));
+        }
+
+        function queueAraiNameDiagnosticWrite(record = araiNameDiagnosticRecord) {
+            const storage = getSiteSearchBridgeLocalStorage();
+            if (!storage || !record) return Promise.resolve();
+
+            const snapshot = cloneAraiNameDiagnosticRecord(record);
+            araiNameDiagnosticWriteQueue = araiNameDiagnosticWriteQueue
+                .catch(() => undefined)
+                .then(() => storage.set({ [ARAI_NAME_DIAGNOSTIC_KEY]: snapshot }))
+                .catch(error => {
+                    if (!/extension context invalidated/i.test(String(error?.message || error))) {
+                        console.warn("MLive Linkifier: Arai name diagnostic write failed", error);
+                    }
+                });
+            return araiNameDiagnosticWriteQueue;
+        }
+
+        async function getAraiNameDiagnosticRecord() {
+            const storage = getSiteSearchBridgeLocalStorage();
+            if (!storage) return null;
+
+            const result = await storage.get(ARAI_NAME_DIAGNOSTIC_KEY);
+            const record = result[ARAI_NAME_DIAGNOSTIC_KEY];
+            return record && typeof record === "object" ? record : null;
+        }
+
+        function recordAraiNameDiagnosticStep(kind, detail = {}) {
+            const record = araiNameDiagnosticRecord;
+            if (!record || record.status !== "recording") return;
+
+            const snapshot = getAraiNameDiagnosticSnapshot();
+            const signature = getAraiNameDiagnosticSnapshotSignature(snapshot);
+            if (kind === "dom_update" && signature === araiNameDiagnosticSnapshotSignature) return;
+
+            araiNameDiagnosticSnapshotSignature = signature;
+            record.steps.push({
+                sequence: Number(record.nextSequence || 1),
+                at: Date.now(),
+                kind,
+                detail,
+                snapshot
+            });
+            record.nextSequence = Number(record.nextSequence || 1) + 1;
+            if (record.steps.length > ARAI_NAME_DIAGNOSTIC_STEP_LIMIT) {
+                record.steps.splice(0, record.steps.length - ARAI_NAME_DIAGNOSTIC_STEP_LIMIT);
+            }
+            record.updatedAt = Date.now();
+            publishAraiNameDiagnosticSummary(record);
+            void queueAraiNameDiagnosticWrite(record);
+        }
+
+        function isAraiNameDiagnosticMutationRelevant(mutations) {
+            const selector = "[id^='s1_'],#tbCarNameList,#tbGradeList,#search_box,#tabclient0,#tabclient1,#tabclient2,#tabclient3";
+            return mutations.some(mutation => {
+                const target = mutation.target?.nodeType === 1 ? mutation.target : mutation.target?.parentElement;
+                if (target?.closest(selector)) return true;
+
+                return Array.from(mutation.addedNodes || []).some(node => {
+                    const element = node?.nodeType === 1 ? node : node?.parentElement;
+                    return !!(element?.matches?.(selector) || element?.querySelector?.(selector));
+                });
+            });
+        }
+
+        function scheduleAraiNameDiagnosticMutationRecord() {
+            if (araiNameDiagnosticMutationTimer) clearTimeout(araiNameDiagnosticMutationTimer);
+            araiNameDiagnosticMutationTimer = setTimeout(() => {
+                araiNameDiagnosticMutationTimer = null;
+                recordAraiNameDiagnosticStep("dom_update");
+            }, 120);
+        }
+
+        function handleAraiNameDiagnosticClick(event) {
+            if (!event.isTrusted || !isAraiNameDiagnosticRelevantTarget(event.target)) return;
+            recordAraiNameDiagnosticStep("user_click", { target: getAraiNameDiagnosticTarget(event.target) });
+        }
+
+        function handleAraiNameDiagnosticChange(event) {
+            if (!event.isTrusted || !isAraiNameDiagnosticRelevantTarget(event.target)) return;
+            recordAraiNameDiagnosticStep("user_change", { target: getAraiNameDiagnosticTarget(event.target) });
+        }
+
+        function handleAraiNameDiagnosticInput(event) {
+            const target = event.target;
+            if (!event.isTrusted || !(target?.id === "history_check" || target?.name === "pattern")) return;
+            recordAraiNameDiagnosticStep("user_input", { target: getAraiNameDiagnosticTarget(target) });
+        }
+
+        function handleAraiNameDiagnosticAlert() {
+            const message = normalizeSearchBridgeText(document.documentElement?.getAttribute(ARAI_NAME_DIAGNOSTIC_ALERT_ATTR) || "");
+            if (!message || message === araiNameDiagnosticAlertValue) return;
+            araiNameDiagnosticAlertValue = message;
+            recordAraiNameDiagnosticStep("alert", { message: message.slice(0, 240) });
+        }
+
+        function installAraiNameDiagnosticListeners() {
+            document.addEventListener("click", handleAraiNameDiagnosticClick, true);
+            document.addEventListener("change", handleAraiNameDiagnosticChange, true);
+            document.addEventListener("input", handleAraiNameDiagnosticInput, true);
+            window.addEventListener(ARAI_NAME_DIAGNOSTIC_ALERT_EVENT, handleAraiNameDiagnosticAlert);
+
+            araiNameDiagnosticObserver = new MutationObserver(mutations => {
+                if (isAraiNameDiagnosticMutationRelevant(mutations)) scheduleAraiNameDiagnosticMutationRecord();
+            });
+            araiNameDiagnosticObserver.observe(document.documentElement, {
+                subtree: true,
+                childList: true,
+                attributes: true,
+                attributeFilter: ["class", "style", "value", "checked", "aria-selected", "aria-checked"]
+            });
+        }
+
+        function removeAraiNameDiagnosticListeners() {
+            document.removeEventListener("click", handleAraiNameDiagnosticClick, true);
+            document.removeEventListener("change", handleAraiNameDiagnosticChange, true);
+            document.removeEventListener("input", handleAraiNameDiagnosticInput, true);
+            window.removeEventListener(ARAI_NAME_DIAGNOSTIC_ALERT_EVENT, handleAraiNameDiagnosticAlert);
+            araiNameDiagnosticObserver?.disconnect();
+            araiNameDiagnosticObserver = null;
+            if (araiNameDiagnosticMutationTimer) clearTimeout(araiNameDiagnosticMutationTimer);
+            araiNameDiagnosticMutationTimer = null;
+        }
+
+        function runAraiNameDiagnosticMainAction(command) {
+            const root = document.documentElement;
+            if (!root) return false;
+
+            try {
+                root.setAttribute(ARAI_NAME_DIAGNOSTIC_ACTIVE_ATTR, command === "start" ? "1" : "0");
+                root.setAttribute(ARAI_NAME_DIAGNOSTIC_COMMAND_ATTR, command);
+                root.setAttribute(ARAI_NAME_DIAGNOSTIC_RESULT_ATTR, "0");
+                window.dispatchEvent(new Event(ARAI_NAME_DIAGNOSTIC_EVENT));
+                return root.getAttribute(ARAI_NAME_DIAGNOSTIC_RESULT_ATTR) === "1";
+            } catch {
+                return false;
+            } finally {
+                root.removeAttribute(ARAI_NAME_DIAGNOSTIC_COMMAND_ATTR);
+            }
+        }
+
+        async function startAraiNameDiagnostic() {
+            if (!isAraiSearchBridgeMode(getAraiSearchBridgeMode()) || getAraiCurrentSearchKind() !== ARAI_SEARCH_KIND_NAME) {
+                showSiteSearchBridgeNotice(getAraiSearchBridgeAdapter(), "車名検索タブで開始してください", "error");
+                return false;
+            }
+            if (!getSiteSearchBridgeLocalStorage()) {
+                showSiteSearchBridgeNotice(getAraiSearchBridgeAdapter(), "拡張を更新後、ページを再読み込みしてください", "error");
+                return false;
+            }
+
+            removeAraiNameDiagnosticListeners();
+            const now = Date.now();
+            araiNameDiagnosticAlertValue = "";
+            araiNameDiagnosticSnapshotSignature = "";
+            araiNameDiagnosticRecord = {
+                version: 1,
+                status: "recording",
+                startedAt: now,
+                updatedAt: now,
+                sourceUrl: location.href,
+                nextSequence: 1,
+                steps: []
+            };
+            runAraiNameDiagnosticMainAction("start");
+            installAraiNameDiagnosticListeners();
+            recordAraiNameDiagnosticStep("recording_started");
+            await queueAraiNameDiagnosticWrite(araiNameDiagnosticRecord);
+            return true;
+        }
+
+        async function stopAraiNameDiagnostic() {
+            const record = araiNameDiagnosticRecord;
+            if (!record) return null;
+
+            recordAraiNameDiagnosticStep("recording_finished");
+            record.status = "stopped";
+            record.updatedAt = Date.now();
+            removeAraiNameDiagnosticListeners();
+            runAraiNameDiagnosticMainAction("stop");
+            publishAraiNameDiagnosticSummary(record);
+            await queueAraiNameDiagnosticWrite(record);
+            return record;
+        }
+
+        async function discardAraiNameDiagnostic() {
+            removeAraiNameDiagnosticListeners();
+            runAraiNameDiagnosticMainAction("clear");
+            araiNameDiagnosticRecord = null;
+            araiNameDiagnosticSnapshotSignature = "";
+            document.documentElement?.removeAttribute(ARAI_NAME_DIAGNOSTIC_SUMMARY_ATTR);
+            const storage = getSiteSearchBridgeLocalStorage();
+            if (storage) await storage.remove(ARAI_NAME_DIAGNOSTIC_KEY);
+        }
+
+        function formatAraiNameDiagnosticStep(step) {
+            const target = step?.detail?.target;
+            const targetText = target ? (target.id || target.text || target.name || target.tag || "") : "";
+            const dialogText = Array.isArray(step?.snapshot?.dialogs)
+                ? step.snapshot.dialogs.map(dialog => dialog.title || dialog.id).filter(Boolean).join(" > ")
+                : "";
+            return `${step?.sequence || ""}. ${step?.kind || ""}${targetText ? ` ${targetText}` : ""}${dialogText ? ` [${dialogText}]` : ""}`;
+        }
+
+        async function showAraiNameDiagnosticLog() {
+            const record = araiNameDiagnosticRecord || await getAraiNameDiagnosticRecord();
+            if (!record) {
+                showSiteSearchBridgeNotice(getAraiSearchBridgeAdapter(), "選択記録はありません", "error");
+                return;
+            }
+
+            const old = document.getElementById("arai-name-diagnostic-log");
+            if (old) old.remove();
+
+            const panel = document.createElement("div");
+            panel.id = "arai-name-diagnostic-log";
+            panel.style.position = "fixed";
+            panel.style.right = "16px";
+            panel.style.bottom = "16px";
+            panel.style.zIndex = "1000002";
+            panel.style.width = "min(520px, calc(100vw - 32px))";
+            panel.style.maxHeight = "min(420px, calc(100vh - 32px))";
+            panel.style.overflow = "auto";
+            panel.style.padding = "10px";
+            panel.style.border = "1px solid rgba(0,0,0,0.25)";
+            panel.style.borderRadius = "8px";
+            panel.style.background = "#fff";
+            panel.style.boxShadow = "0 6px 24px rgba(0,0,0,0.25)";
+            panel.style.fontFamily = "sans-serif";
+            panel.style.fontSize = "12px";
+            panel.style.color = "#111827";
+
+            const header = document.createElement("div");
+            header.style.display = "flex";
+            header.style.justifyContent = "space-between";
+            header.style.gap = "8px";
+            const title = document.createElement("strong");
+            title.textContent = `Arai選択記録 ${record.status === "recording" ? "記録中" : "記録済み"} ${record.steps?.length || 0}件`;
+            header.appendChild(title);
+            header.appendChild(createSiteSearchBridgeButton("閉じる", () => panel.remove()));
+            panel.appendChild(header);
+
+            const pre = document.createElement("pre");
+            pre.style.margin = "8px 0 0";
+            pre.style.whiteSpace = "pre-wrap";
+            pre.style.wordBreak = "break-word";
+            pre.textContent = (record.steps || []).map(formatAraiNameDiagnosticStep).join("\n") || "記録はありません";
+            panel.appendChild(pre);
+            document.body.appendChild(panel);
+        }
+
+        async function createAraiNameDiagnosticControls(wrap, adapter) {
+            const record = araiNameDiagnosticRecord || await getAraiNameDiagnosticRecord();
+            const controls = document.createElement("div");
+            controls.style.display = "flex";
+            controls.style.flexWrap = "wrap";
+            controls.style.alignItems = "center";
+            controls.style.gap = "6px";
+            controls.style.padding = "6px";
+            controls.style.border = "1px solid rgba(0,0,0,0.1)";
+            controls.style.borderRadius = "6px";
+            controls.style.background = "#f3f4f6";
+
+            const status = document.createElement("span");
+            status.style.fontSize = "11px";
+            status.style.color = "#374151";
+            status.textContent = record
+                ? `${record.status === "recording" ? "記録中" : "記録済み"} ${record.steps?.length || 0}件`
+                : "選択記録";
+            controls.appendChild(status);
+
+            controls.appendChild(createSiteSearchBridgeButton("選択記録開始", async () => {
+                if (await startAraiNameDiagnostic()) {
+                    showSiteSearchBridgeNotice(adapter, "Arai選択記録を開始しました");
+                    await renderSiteSearchBridgePanel(wrap, adapter);
+                }
+            }, record?.status === "recording"));
+            controls.appendChild(createSiteSearchBridgeButton("記録終了", async () => {
+                const stopped = await stopAraiNameDiagnostic();
+                if (stopped) {
+                    showSiteSearchBridgeNotice(adapter, `Arai選択記録を終了しました (${stopped.steps?.length || 0}件)`);
+                    await renderSiteSearchBridgePanel(wrap, adapter);
+                }
+            }, record?.status !== "recording"));
+            controls.appendChild(createSiteSearchBridgeButton("診断記録", async () => {
+                await showAraiNameDiagnosticLog();
+            }, !record));
+            controls.appendChild(createSiteSearchBridgeButton("記録破棄", async () => {
+                await discardAraiNameDiagnostic();
+                showSiteSearchBridgeNotice(adapter, "Arai選択記録を破棄しました");
+                await renderSiteSearchBridgePanel(wrap, adapter);
+            }, !record));
+
+            return controls;
+        }
 
         function getAraiSearchBridgePendingId(pending) {
             return String(pending?.id || `${pending?.createdAt || ""}:${pending?.targetMode || ""}`);
@@ -3421,7 +3833,7 @@
                 storageKey: ARAI_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: ARAI_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "arai-search-bridge-ui",
-                buildId: "arai-venue-priority-20260710",
+                buildId: "arai-cascade-diagnostic-20260710",
                 position: { right: "12px", top: "132px" },
                 launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.arai,
@@ -3438,11 +3850,14 @@
                         await clearAraiSearchBridgePending("panel_clear");
                         showSiteSearchBridgeNotice(getAraiSearchBridgeAdapter(), "Araiの保留中検索をクリアしました");
                     }));
-                    headerActions.appendChild(createSiteSearchBridgeButton("診断記録", async () => {
+                    headerActions.appendChild(createSiteSearchBridgeButton("Arai状態", async () => {
                         runAraiKaijoSelectorAction("diagnose_state");
                         recordAraiSearchBridgeLog("診断記録", { manual: true });
                         showSiteSearchBridgeNotice(getAraiSearchBridgeAdapter(), "Arai診断を記録しました");
                     }));
+                },
+                appendPanelContent: async (wrap, adapter) => {
+                    wrap.appendChild(await createAraiNameDiagnosticControls(wrap, adapter));
                 },
                 afterPendingCreated: async (pending, targetMode) => {
                     resetAraiSearchBridgeFlow(pending);
