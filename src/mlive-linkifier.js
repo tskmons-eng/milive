@@ -4538,8 +4538,16 @@
         }
 
         function clickJuSelectionCascadeElement(element) {
-            // JU's modal advances selection from its pointer sequence, not a bare HTMLElement.click().
-            return clickSearchBridgeElement(element, true);
+            if (!element || element.disabled) return false;
+
+            try {
+                // JU's React modal must receive each action exactly once. Dispatching a
+                // synthetic click and then calling click() toggles checkboxes twice.
+                element.click();
+                return true;
+            } catch {
+                return false;
+            }
         }
 
         async function restoreJuSelectionCascade(cascade, targetMode) {
@@ -4607,7 +4615,16 @@
             });
             if (!clickJuSelectionCascadeElement(close)) return false;
 
-            return !!await wait(() => !getJuSelectionCascadePopup());
+            const popupClosed = await wait(() => !getJuSelectionCascadePopup());
+            if (!popupClosed) return false;
+
+            const selection = getJuSelectionCascadeVisibleSelection(form);
+            const expectedCars = cascade.cars.map(car => normalizeJuSelectionCascadeText(car.car));
+            const expectedGrades = cascade.cars.flatMap(car => car.grades || [])
+                .map(grade => normalizeJuSelectionCascadeText(grade));
+
+            return expectedCars.every(car => selection.car.includes(car)) &&
+                expectedGrades.every(grade => selection.grade.includes(grade));
         }
 
         function getNormalizedJuSearchBridgePath() {
@@ -4927,7 +4944,7 @@
                 storageKey: JU_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: JU_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "ju-search-bridge-ui",
-                buildId: "ju-cascade-restore-20260710",
+                buildId: "ju-single-click-restore-20260710",
                 position: { right: "12px", top: "84px" },
                 launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.ju,
