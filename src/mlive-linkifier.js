@@ -2048,6 +2048,7 @@
         };
 
         let araiResultCheckRunning = false;
+        let araiPendingFallbackStartupRetryScheduled = false;
 
         function getAraiSearchBridgePendingId(pending) {
             return String(pending?.id || `${pending?.createdAt || ""}:${pending?.targetMode || ""}`);
@@ -3405,7 +3406,7 @@
                 storageKey: ARAI_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: ARAI_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "arai-search-bridge-ui",
-                buildId: "arai-main-fallback-20260710",
+                buildId: "arai-main-fallback-retry-20260710",
                 position: { right: "12px", top: "132px" },
                 launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.arai,
@@ -3466,6 +3467,13 @@
             const adapter = getAraiSearchBridgeAdapter();
             installSiteSearchBridge(adapter);
             applySiteSearchBridgePending(adapter);
+
+            // The MAIN-world fallback is published just after page startup. Retry once after it is available.
+            if (!araiPendingFallbackStartupRetryScheduled) {
+                araiPendingFallbackStartupRetryScheduled = true;
+                scheduleSiteSearchBridgePendingRetry(adapter, 450);
+            }
+
             void logAraiSearchBridgeResultIfReady();
         }
 
