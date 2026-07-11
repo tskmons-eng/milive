@@ -28,68 +28,16 @@
         }
     };
 
-    const createReactEvent = (type, target, currentTarget) => ({
-        type,
-        target,
-        currentTarget,
-        nativeEvent: { type, target, currentTarget },
-        bubbles: true,
-        cancelable: true,
-        defaultPrevented: false,
-        preventDefault() {
-            this.defaultPrevented = true;
-        },
-        stopPropagation() {},
-        persist() {},
-        isDefaultPrevented() {
-            return this.defaultPrevented;
-        },
-        isPropagationStopped() {
-            return false;
+    const waitForNativeActionToSettle = () => new Promise(resolve => {
+        const finish = () => window.setTimeout(resolve, 0);
+        if (typeof window.requestAnimationFrame === "function") {
+            window.requestAnimationFrame(() => window.requestAnimationFrame(finish));
+            return;
         }
+        finish();
     });
 
-    const findReactProps = node => {
-        if (!node) return null;
-
-        const keys = Object.getOwnPropertyNames(node);
-        const propKey = keys.find(key => /^__reactProps\$/.test(key)) ||
-            keys.find(key => /^__reactEventHandlers\$/.test(key));
-        if (!propKey) return null;
-
-        const props = node[propKey];
-        return props && typeof props === "object" ? { key: propKey, props } : null;
-    };
-
-    const findReactHandler = (target, eventName) => {
-        const seen = new Set();
-        const inspect = node => {
-            if (!node || seen.has(node)) return null;
-            seen.add(node);
-
-            const react = findReactProps(node);
-            const handler = react?.props?.[eventName];
-            return typeof handler === "function"
-                ? { handler, node, propKey: react.key }
-                : null;
-        };
-
-        let current = target;
-        for (let depth = 0; current && current !== document.body && depth < 7; depth += 1) {
-            const match = inspect(current);
-            if (match) return match;
-            current = current.parentElement;
-        }
-
-        for (const descendant of target.querySelectorAll("*")) {
-            const match = inspect(descendant);
-            if (match) return match;
-        }
-
-        return null;
-    };
-
-    const handleAction = () => {
+    const handleAction = async () => {
         const root = document.documentElement;
         if (!root) return;
 
@@ -115,42 +63,34 @@
             return;
         }
 
-        const reactHandler = findReactHandler(target, eventName);
-        if (!reactHandler) {
-            writeResult({ ok: false, token, action, error: `${eventName}_missing` });
+        if (typeof target.click !== "function") {
+            writeResult({ ok: false, token, action, error: "click_missing" });
             return;
         }
 
         try {
+            let alreadySelected = false;
             if (action === "change") {
                 if (typeof target.checked !== "boolean") {
                     writeResult({ ok: false, token, action, error: "checkbox_missing" });
                     return;
                 }
-                target.checked = !!payload.checked;
+                alreadySelected = target.checked === !!payload.checked;
             }
 
-            const output = reactHandler.handler(createReactEvent(action, target, reactHandler.node));
             const metadata = {
                 token,
                 action,
                 eventName,
                 targetId: target.id || "",
-                handlerNodeId: reactHandler.node.id || "",
-                handlerNodeTag: reactHandler.node.tagName || "",
-                propKey: reactHandler.propKey,
-                handlerName: reactHandler.handler.name || "anonymous",
-                method: "react_handler"
+                targetTag: target.tagName || "",
+                method: "native_dom_click",
+                alreadySelected
             };
 
-            Promise.resolve(output).then(
-                () => writeResult({ ok: true, completed: true, ...metadata }),
-                error => writeResult({
-                    ok: false,
-                    ...metadata,
-                    error: String(error?.message || error).slice(0, 200)
-                })
-            );
+            if (!alreadySelected) target.click();
+            await waitForNativeActionToSettle();
+            writeResult({ ok: true, completed: true, ...metadata });
         } catch (error) {
             writeResult({
                 ok: false,

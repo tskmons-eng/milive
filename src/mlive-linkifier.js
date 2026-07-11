@@ -5039,7 +5039,7 @@
                 storageKey: JU_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: JU_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "ju-search-bridge-ui",
-                buildId: "ju-react-selection-bridge-v6-20260711",
+                buildId: "ju-native-selection-bridge-v7-20260711",
                 position: { right: "12px", top: "84px" },
                 launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.ju,
