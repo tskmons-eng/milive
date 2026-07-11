@@ -286,6 +286,7 @@
         const ARAI_SEARCH_BRIDGE_LOG_LIMIT = 80;
         const ARAI_NAME_DIAGNOSTIC_STEP_LIMIT = 60;
         const JU_SELECTION_CASCADE_MAX_WAIT_MS = 12000;
+        const JU_MAIN_ACTION_TIMEOUT_MS = 8000;
         const SEARCH_BRIDGE_PENDING_MAX_AGE_MS = 10 * 60 * 1000;
         const JU_SEARCH_BRIDGE_SLOTS_KEY = "juSearchBridgeSlots";
         const JU_SEARCH_BRIDGE_PENDING_KEY = "juSearchBridgePending";
@@ -4580,7 +4581,7 @@
                     normalizeSearchBridgeText(button.textContent || button.value || button.getAttribute("aria-label")) === expected) || null;
         }
 
-        function runJuMainAction(element, action, detail = {}) {
+        async function runJuMainAction(element, action, detail = {}, timeoutMs = JU_MAIN_ACTION_TIMEOUT_MS) {
             const root = document.documentElement;
             if (!root || !element) return null;
 
@@ -4591,9 +4592,20 @@
                 root.setAttribute(JU_MAIN_ACTION_ATTR, JSON.stringify({ token, action, ...detail }));
                 window.dispatchEvent(new Event(JU_MAIN_ACTION_EVENT));
 
-                const raw = root.getAttribute(JU_MAIN_ACTION_RESULT_ATTR);
-                const result = raw ? JSON.parse(raw) : null;
-                return result && typeof result === "object" ? result : null;
+                const deadline = Date.now() + Math.max(0, timeoutMs);
+                while (Date.now() <= deadline) {
+                    try {
+                        const raw = root.getAttribute(JU_MAIN_ACTION_RESULT_ATTR);
+                        const result = raw ? JSON.parse(raw) : null;
+                        if (result && typeof result === "object" && result.token === token) return result;
+                    } catch {
+                        // A malformed diagnostic response must not let the bridge continue.
+                    }
+
+                    await new Promise(resolve => window.setTimeout(resolve, 40));
+                }
+
+                return null;
             } catch {
                 return null;
             } finally {
@@ -4602,17 +4614,17 @@
             }
         }
 
-        function clickJuSelectionCascadeElement(element) {
+        async function clickJuSelectionCascadeElement(element, timeoutMs) {
             if (!element || element.disabled) return false;
             const clickTarget = element.matches?.("[id$='-Maker_CarName']")
                 ? element.querySelector(".junaviweb-commonsearch-input-select-tag-container") || element
                 : element;
-            return !!runJuMainAction(clickTarget, "click")?.ok;
+            return !!(await runJuMainAction(clickTarget, "click", {}, timeoutMs))?.ok;
         }
 
-        function setJuSelectionCascadeCheckbox(input, checked) {
+        async function setJuSelectionCascadeCheckbox(input, checked, timeoutMs) {
             if (!input || input.disabled) return false;
-            return !!runJuMainAction(input, "change", { checked: !!checked })?.ok;
+            return !!(await runJuMainAction(input, "change", { checked: !!checked }, timeoutMs))?.ok;
         }
 
         async function restoreJuSelectionCascade(cascade, targetMode) {
@@ -4625,13 +4637,13 @@
 
             const opener = document.getElementById(`${prefix}Maker_CarName`) ||
                 form.querySelector("[id$='-Maker_CarName']");
-            if (!clickJuSelectionCascadeElement(opener)) return false;
+            if (!(await clickJuSelectionCascadeElement(opener, Math.max(0, deadline - Date.now())))) return false;
 
             let popup = await wait(getJuSelectionCascadePopup);
             if (!popup) return false;
 
             const reset = await wait(() => findJuSelectionCascadeButton(getJuSelectionCascadePopup(), "リセット"));
-            if (!clickJuSelectionCascadeElement(reset)) return false;
+            if (!(await clickJuSelectionCascadeElement(reset, Math.max(0, deadline - Date.now())))) return false;
 
             // JU retains modal state until its own reset action rerenders the maker list.
             const resetApplied = await wait(() => {
@@ -4649,7 +4661,7 @@
             for (const car of cascade.cars) {
                 const maker = await wait(() => findJuSelectionCascadeMaker(getJuSelectionCascadePopup(), car.maker));
                 const makerTarget = maker?.querySelector("[id$='-b4-Content']") || maker;
-                if (!clickJuSelectionCascadeElement(makerTarget)) return false;
+                if (!(await clickJuSelectionCascadeElement(makerTarget, Math.max(0, deadline - Date.now())))) return false;
 
                 const carInput = await wait(() => {
                     const currentPopup = getJuSelectionCascadePopup();
@@ -4658,7 +4670,7 @@
                     return findJuSelectionCascadeCheckbox(currentPopup, "CarNameCheckbox", car.car);
                 });
                 if (!carInput) return false;
-                if (!carInput.checked && !setJuSelectionCascadeCheckbox(carInput, true)) return false;
+                if (!carInput.checked && !(await setJuSelectionCascadeCheckbox(carInput, true, Math.max(0, deadline - Date.now())))) return false;
 
                 const selectedCar = await wait(() => {
                     const current = findJuSelectionCascadeCheckbox(getJuSelectionCascadePopup(), "CarNameCheckbox", car.car);
@@ -4670,7 +4682,7 @@
             const gradeCars = cascade.cars.filter(car => car.grades?.length);
             if (gradeCars.length) {
                 const next = await wait(() => findJuSelectionCascadeButton(getJuSelectionCascadePopup(), "型式・グレード選択へ"));
-                if (!clickJuSelectionCascadeElement(next)) return false;
+                if (!(await clickJuSelectionCascadeElement(next, Math.max(0, deadline - Date.now())))) return false;
 
                 popup = await wait(() => getJuSelectionCascadeCheckboxes(getJuSelectionCascadePopup(), "Checkbox3").length > 0
                     ? getJuSelectionCascadePopup()
@@ -4681,7 +4693,7 @@
                     for (const grade of car.grades) {
                         const gradeInput = await wait(() => findJuSelectionCascadeCheckbox(getJuSelectionCascadePopup(), "Checkbox3", grade));
                         if (!gradeInput) return false;
-                        if (!gradeInput.checked && !setJuSelectionCascadeCheckbox(gradeInput, true)) return false;
+                        if (!gradeInput.checked && !(await setJuSelectionCascadeCheckbox(gradeInput, true, Math.max(0, deadline - Date.now())))) return false;
 
                         const selectedGrade = await wait(() => {
                             const current = findJuSelectionCascadeCheckbox(getJuSelectionCascadePopup(), "Checkbox3", grade);
@@ -4693,7 +4705,7 @@
             }
 
             const close = await wait(() => findJuSelectionCascadeButton(getJuSelectionCascadePopup(), "確定して閉じる"));
-            if (!clickJuSelectionCascadeElement(close)) return false;
+            if (!(await clickJuSelectionCascadeElement(close, Math.max(0, deadline - Date.now())))) return false;
 
             const popupClosed = await wait(() => !getJuSelectionCascadePopup());
             if (!popupClosed) return false;
@@ -5027,7 +5039,7 @@
                 storageKey: JU_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: JU_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "ju-search-bridge-ui",
-                buildId: "ju-react-selection-bridge-v5-20260711",
+                buildId: "ju-react-selection-bridge-v6-20260711",
                 position: { right: "12px", top: "84px" },
                 launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.ju,

@@ -105,53 +105,56 @@
         const token = String(payload?.token || "");
         const eventName = action === "change" ? "onChange" : action === "click" ? "onClick" : "";
         if (!token || !eventName) {
-            writeResult({ ok: false, action, error: "invalid_action" });
+            writeResult({ ok: false, token, action, error: "invalid_action" });
             return;
         }
 
         const target = document.querySelector(`[${TOKEN_ATTR}="${token}"]`);
         if (!target) {
-            writeResult({ ok: false, action, error: "target_missing" });
+            writeResult({ ok: false, token, action, error: "target_missing" });
             return;
         }
 
         const reactHandler = findReactHandler(target, eventName);
         if (!reactHandler) {
-            writeResult({ ok: false, action, error: `${eventName}_missing` });
+            writeResult({ ok: false, token, action, error: `${eventName}_missing` });
             return;
         }
 
         try {
             if (action === "change") {
                 if (typeof target.checked !== "boolean") {
-                    writeResult({ ok: false, action, error: "checkbox_missing" });
+                    writeResult({ ok: false, token, action, error: "checkbox_missing" });
                     return;
                 }
                 target.checked = !!payload.checked;
             }
 
             const output = reactHandler.handler(createReactEvent(action, target, reactHandler.node));
-            writeResult({
-                ok: true,
+            const metadata = {
+                token,
                 action,
                 eventName,
                 targetId: target.id || "",
                 handlerNodeId: reactHandler.node.id || "",
                 handlerNodeTag: reactHandler.node.tagName || "",
                 propKey: reactHandler.propKey,
-                handlerName: reactHandler.handler.name || "anonymous"
-            });
+                handlerName: reactHandler.handler.name || "anonymous",
+                method: "react_handler"
+            };
 
-            Promise.resolve(output).catch(error => {
-                writeResult({
+            Promise.resolve(output).then(
+                () => writeResult({ ok: true, completed: true, ...metadata }),
+                error => writeResult({
                     ok: false,
-                    action,
+                    ...metadata,
                     error: String(error?.message || error).slice(0, 200)
-                });
-            });
+                })
+            );
         } catch (error) {
             writeResult({
                 ok: false,
+                token,
                 action,
                 error: String(error?.message || error).slice(0, 200)
             });
