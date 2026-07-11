@@ -1435,7 +1435,15 @@
         }
 
         async function saveSiteSearchBridgeConditionSlot(adapter, slotId) {
-            const condition = adapter.collectCondition();
+            let condition = await adapter.collectCondition();
+            if (!condition &&
+                Number(adapter.saveRetryDelayMs || 0) > 0 &&
+                typeof adapter.isSaveFormReady === "function" &&
+                !adapter.isSaveFormReady()) {
+                await new Promise(resolve => setTimeout(resolve, Number(adapter.saveRetryDelayMs)));
+                condition = await adapter.collectCondition();
+            }
+
             if (!condition) {
                 showSiteSearchBridgeNotice(adapter, "この画面では保存できる検索条件が見つかりません", "error");
                 return null;
@@ -4817,13 +4825,17 @@
             return isJuSearchBridgeSearchPage();
         }
 
+        function getJuSearchBridgeConditionControls(form) {
+            return Array.from(form?.querySelectorAll?.("input,select,textarea") || [])
+                .filter(el => isJuSearchBridgeConditionControl(el));
+        }
+
         function collectJuSearchBridgeCondition() {
             const sourceMode = getJuSearchBridgeMode();
             const form = getJuSearchBridgeForm(sourceMode);
             if (!isJuSearchBridgeMode(sourceMode) || !form) return null;
 
-            const fields = Array.from(form.querySelectorAll("input,select,textarea"))
-                .filter(el => isJuSearchBridgeConditionControl(el))
+            const fields = getJuSearchBridgeConditionControls(form)
                 .map(el => {
                     const key = getJuSearchBridgeFieldKey(el);
                     if (!key) return null;
@@ -4831,8 +4843,6 @@
                     return createSearchBridgeFieldRecord(el, { key });
                 })
                 .filter(Boolean);
-
-            if (fields.length === 0) return null;
 
             const juSelectionCascade = getJuSelectionCascadeForSaving(form);
             if (juSelectionCascade?.blocked) {
@@ -4843,6 +4853,8 @@
                 );
                 return null;
             }
+
+            if (fields.length === 0 && !juSelectionCascade?.cars?.length) return null;
 
             return {
                 version: MLIVE_SEARCH_BRIDGE_VERSION,
@@ -5039,7 +5051,7 @@
                 storageKey: JU_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: JU_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "ju-search-bridge-ui",
-                buildId: "ju-native-selection-bridge-v7-20260711",
+                buildId: "ju-save-readiness-v8-20260711",
                 position: { right: "12px", top: "84px" },
                 launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.ju,
@@ -5053,6 +5065,12 @@
                     const mode = getJuSearchBridgeMode();
                     return isJuSearchBridgeMode(mode) && !!getJuSearchBridgeForm(mode);
                 },
+                isSaveFormReady: () => {
+                    const mode = getJuSearchBridgeMode();
+                    const form = getJuSearchBridgeForm(mode);
+                    return isJuSearchBridgeMode(mode) && getJuSearchBridgeConditionControls(form).length > 0;
+                },
+                saveRetryDelayMs: 500,
                 collectCondition: collectJuSearchBridgeCondition,
                 restoreCondition: restoreJuSearchBridgeCondition,
                 getTargetUrl: getJuSearchBridgeTargetUrl,
