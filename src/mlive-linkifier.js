@@ -4452,6 +4452,15 @@
             };
         }
 
+        function getJuSelectionCascadeVisibleCarNames(form, targetMode = getJuSearchBridgeMode()) {
+            const prefix = getJuSearchBridgeTargetPrefix(targetMode);
+            const widget = document.getElementById(`${prefix}Maker_CarName`) ||
+                form?.querySelector?.("[id$='-Maker_CarName']");
+            return Array.from(widget?.querySelectorAll?.(".junaviweb-commonsearch-select-car-tag .junaviweb-nowrap") || [])
+                .map(element => normalizeJuSelectionCascadeText(element.textContent || ""))
+                .filter(Boolean);
+        }
+
         function mergeJuSelectionCascadeVisibleSelection(cascade, visible) {
             if (!cascade || cascade.blocked) return cascade;
 
@@ -4562,6 +4571,14 @@
             return !!button && !button.disabled && button.getAttribute("aria-disabled") !== "true";
         }
 
+        function findJuSelectionCascadeButton(popup, text) {
+            const expected = normalizeSearchBridgeText(text);
+            return Array.from(popup?.querySelectorAll?.("button,input[type='button'],input[type='submit'],a") || [])
+                .find(button => isSearchBridgeElementVisible(button) &&
+                    isJuSelectionCascadeButtonEnabled(button) &&
+                    normalizeSearchBridgeText(button.textContent || button.value || button.getAttribute("aria-label")) === expected) || null;
+        }
+
         function runJuMainAction(element, action, detail = {}) {
             const root = document.documentElement;
             if (!root || !element) return null;
@@ -4612,12 +4629,33 @@
             let popup = await wait(getJuSelectionCascadePopup);
             if (!popup) return false;
 
+            const reset = await wait(() => findJuSelectionCascadeButton(getJuSelectionCascadePopup(), "リセット"));
+            if (!clickJuSelectionCascadeElement(reset)) return false;
+
+            // JU retains modal state until its own reset action rerenders the maker list.
+            const resetApplied = await wait(() => {
+                const currentPopup = getJuSelectionCascadePopup();
+                if (!currentPopup) return null;
+
+                const hasSelectedMaker = Array.from(currentPopup.querySelectorAll(".junaviweb-popup-maker-selected-color"))
+                    .some(element => isSearchBridgeElementVisible(element));
+                const hasCheckedCar = getJuSelectionCascadeCheckboxes(currentPopup, "CarNameCheckbox")
+                    .some(input => input.checked);
+                return !hasSelectedMaker && !hasCheckedCar ? currentPopup : null;
+            });
+            if (!resetApplied) return false;
+
             for (const car of cascade.cars) {
                 const maker = await wait(() => findJuSelectionCascadeMaker(getJuSelectionCascadePopup(), car.maker));
                 const makerTarget = maker?.querySelector("[id$='-b4-Content']") || maker;
                 if (!clickJuSelectionCascadeElement(makerTarget)) return false;
 
-                const carInput = await wait(() => findJuSelectionCascadeCheckbox(getJuSelectionCascadePopup(), "CarNameCheckbox", car.car));
+                const carInput = await wait(() => {
+                    const currentPopup = getJuSelectionCascadePopup();
+                    const activeMaker = findJuSelectionCascadeMaker(currentPopup, car.maker);
+                    if (!activeMaker?.classList.contains("junaviweb-popup-maker-selected-color")) return null;
+                    return findJuSelectionCascadeCheckbox(currentPopup, "CarNameCheckbox", car.car);
+                });
                 if (!carInput) return false;
                 if (!carInput.checked && !setJuSelectionCascadeCheckbox(carInput, true)) return false;
 
@@ -4630,10 +4668,7 @@
 
             const gradeCars = cascade.cars.filter(car => car.grades?.length);
             if (gradeCars.length) {
-                const next = await wait(() => {
-                    const button = findVisibleSearchBridgeButtonByText("型式・グレード選択へ", getJuSelectionCascadePopup() || document);
-                    return isJuSelectionCascadeButtonEnabled(button) ? button : null;
-                });
+                const next = await wait(() => findJuSelectionCascadeButton(getJuSelectionCascadePopup(), "型式・グレード選択へ"));
                 if (!clickJuSelectionCascadeElement(next)) return false;
 
                 popup = await wait(() => getJuSelectionCascadeCheckboxes(getJuSelectionCascadePopup(), "Checkbox3").length > 0
@@ -4656,21 +4691,21 @@
                 }
             }
 
-            const close = await wait(() => {
-                const button = findVisibleSearchBridgeButtonByText("確定して閉じる", getJuSelectionCascadePopup() || document);
-                return isJuSelectionCascadeButtonEnabled(button) ? button : null;
-            });
+            const close = await wait(() => findJuSelectionCascadeButton(getJuSelectionCascadePopup(), "確定して閉じる"));
             if (!clickJuSelectionCascadeElement(close)) return false;
 
             const popupClosed = await wait(() => !getJuSelectionCascadePopup());
             if (!popupClosed) return false;
 
             const selection = getJuSelectionCascadeVisibleSelection(form);
-            const expectedCars = cascade.cars.map(car => normalizeJuSelectionCascadeText(car.car));
+            const expectedCars = Array.from(new Set(cascade.cars.map(car => normalizeJuSelectionCascadeText(car.car))));
             const expectedGrades = cascade.cars.flatMap(car => car.grades || [])
                 .map(grade => normalizeJuSelectionCascadeText(grade));
+            const actualCars = getJuSelectionCascadeVisibleCarNames(form, targetMode);
 
-            return expectedCars.every(car => selection.car.includes(car)) &&
+            return actualCars.length === expectedCars.length &&
+                expectedCars.every(car => actualCars.includes(car)) &&
+                expectedCars.every(car => selection.car.includes(car)) &&
                 expectedGrades.every(grade => selection.grade.includes(grade));
         }
 
@@ -4991,7 +5026,7 @@
                 storageKey: JU_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: JU_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "ju-search-bridge-ui",
-                buildId: "ju-native-click-bridge-v4-20260711",
+                buildId: "ju-react-selection-bridge-v5-20260711",
                 position: { right: "12px", top: "84px" },
                 launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.ju,
