@@ -766,9 +766,26 @@
                 title.style.fontWeight = "700";
                 header.appendChild(title);
 
-                header.appendChild(createMLiveBridgeButton("閉じる", async () => {
+                const headerActions = document.createElement("div");
+                headerActions.style.display = "flex";
+                headerActions.style.alignItems = "center";
+                headerActions.style.gap = "6px";
+
+                const hasSavedConditions = store.slots.some(slot => !!slot.condition);
+                const clearButton = createMLiveBridgeButton("全削除", async () => {
+                    if (!confirm("MLiveの保存1-5にある条件をすべて削除しますか？")) return;
+
+                    await clearMLiveSearchConditionSlots();
+                    showMLiveBridgeNotice("保存済み条件をすべて削除しました");
+                    await renderMLiveSlotPanel(wrap, options);
+                }, !hasSavedConditions);
+                clearButton.style.background = "#b91c1c";
+                headerActions.appendChild(clearButton);
+
+                headerActions.appendChild(createMLiveBridgeButton("閉じる", async () => {
                     renderMLiveSlotLauncher(wrap, options);
                 }));
+                header.appendChild(headerActions);
 
                 wrap.appendChild(header);
 
@@ -1003,6 +1020,15 @@
             if (!slot) return null;
 
             slot.condition = null;
+            await chrome.storage.local.set({ [MLIVE_SEARCH_BRIDGE_SLOTS_KEY]: store });
+            return store;
+        }
+
+        async function clearMLiveSearchConditionSlots() {
+            const store = await getMLiveSearchSlotStore();
+            store.slots.forEach(slot => {
+                slot.condition = null;
+            });
             await chrome.storage.local.set({ [MLIVE_SEARCH_BRIDGE_SLOTS_KEY]: store });
             return store;
         }
@@ -1478,6 +1504,15 @@
             return store;
         }
 
+        async function clearSiteSearchBridgeConditionSlots(adapter) {
+            const store = await getSiteSearchBridgeSlotStore(adapter.storageKey);
+            store.slots.forEach(slot => {
+                slot.condition = null;
+            });
+            await requireSiteSearchBridgeLocalStorage().set({ [adapter.storageKey]: store });
+            return store;
+        }
+
         async function startSiteSearchBridgeSearch(adapter, targetMode, condition = null) {
             const savedCondition = normalizeSiteSearchBridgeCondition(condition);
             if (!savedCondition) {
@@ -1664,6 +1699,17 @@
                 if (typeof adapter.appendPanelActions === "function") {
                     adapter.appendPanelActions(headerActions, wrap, adapter);
                 }
+
+                const hasSavedConditions = store.slots.some(slot => !!slot.condition);
+                const clearButton = createSiteSearchBridgeButton("全削除", async () => {
+                    if (!confirm(`${adapter.title}の保存1-5にある条件をすべて削除しますか？`)) return;
+
+                    await clearSiteSearchBridgeConditionSlots(adapter);
+                    showSiteSearchBridgeNotice(adapter, "保存済み条件をすべて削除しました");
+                    await renderSiteSearchBridgePanel(wrap, adapter);
+                }, !hasSavedConditions);
+                clearButton.style.background = "#b91c1c";
+                headerActions.appendChild(clearButton);
 
                 headerActions.appendChild(createSiteSearchBridgeButton("閉じる", async () => {
                     renderSiteSearchBridgeLauncher(wrap, adapter);
@@ -5051,7 +5097,7 @@
                 storageKey: JU_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: JU_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "ju-search-bridge-ui",
-                buildId: "ju-save-readiness-v8-20260711",
+                buildId: "ju-save-readiness-v9-20260711",
                 position: { right: "12px", top: "84px" },
                 launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.ju,
