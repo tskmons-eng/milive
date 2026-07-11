@@ -4586,7 +4586,10 @@
 
         function clickJuSelectionCascadeElement(element) {
             if (!element || element.disabled) return false;
-            return !!runJuMainAction(element, "click")?.ok;
+            const clickTarget = element.matches?.("[id$='-Maker_CarName']")
+                ? element.querySelector(".junaviweb-commonsearch-input-select-tag-container") || element
+                : element;
+            return !!runJuMainAction(clickTarget, "click")?.ok;
         }
 
         function setJuSelectionCascadeCheckbox(input, checked) {
@@ -4988,7 +4991,7 @@
                 storageKey: JU_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: JU_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "ju-search-bridge-ui",
-                buildId: "ju-main-react-bridge-v3-20260710",
+                buildId: "ju-native-click-bridge-v4-20260711",
                 position: { right: "12px", top: "84px" },
                 launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.ju,

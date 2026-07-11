@@ -28,69 +28,6 @@
         }
     };
 
-    const createEvent = (type, target) => ({
-        type,
-        target,
-        currentTarget: target,
-        nativeEvent: { type, target, currentTarget: target },
-        bubbles: true,
-        cancelable: true,
-        defaultPrevented: false,
-        preventDefault() {
-            this.defaultPrevented = true;
-        },
-        stopPropagation() {},
-        persist() {},
-        isDefaultPrevented() {
-            return this.defaultPrevented;
-        },
-        isPropagationStopped() {
-            return false;
-        }
-    });
-
-    const findReactProps = node => {
-        if (!node) return null;
-
-        const keys = Object.getOwnPropertyNames(node);
-        const propKey = keys.find(key => /^__reactProps\$/.test(key)) ||
-            keys.find(key => /^__reactEventHandlers\$/.test(key));
-        if (propKey) {
-            const props = node[propKey];
-            if (props && typeof props === "object") return { key: propKey, props };
-        }
-
-        return null;
-    };
-
-    const findReactHandler = (target, eventName) => {
-        const seen = new Set();
-        const inspect = node => {
-            if (!node || seen.has(node)) return null;
-            seen.add(node);
-
-            const react = findReactProps(node);
-            const handler = react?.props?.[eventName];
-            return typeof handler === "function"
-                ? { handler, node, propKey: react.key }
-                : null;
-        };
-
-        let current = target;
-        for (let depth = 0; current && current !== document.body && depth < 7; depth += 1) {
-            const match = inspect(current);
-            if (match) return match;
-            current = current.parentElement;
-        }
-
-        for (const descendant of target.querySelectorAll("*")) {
-            const match = inspect(descendant);
-            if (match) return match;
-        }
-
-        return null;
-    };
-
     const handleAction = () => {
         const root = document.documentElement;
         if (!root) return;
@@ -105,8 +42,7 @@
 
         const action = String(payload?.action || "");
         const token = String(payload?.token || "");
-        const eventName = action === "change" ? "onChange" : action === "click" ? "onClick" : "";
-        if (!token || !eventName) {
+        if (!token || (action !== "change" && action !== "click")) {
             writeResult({ ok: false, action, error: "invalid_action" });
             return;
         }
@@ -117,38 +53,30 @@
             return;
         }
 
-        const reactHandler = findReactHandler(target, eventName);
-        if (!reactHandler) {
-            writeResult({ ok: false, action, error: `${eventName}_missing` });
-            return;
-        }
-
         try {
             if (action === "change") {
                 if (typeof target.checked !== "boolean") {
                     writeResult({ ok: false, action, error: "checkbox_missing" });
                     return;
                 }
-                target.checked = !!payload.checked;
+                const expected = !!payload.checked;
+                if (target.checked !== expected) target.click();
+                writeResult({
+                    ok: target.checked === expected,
+                    action,
+                    method: "native_click",
+                    targetId: target.id || "",
+                    checked: !!target.checked
+                });
+                return;
             }
 
-            const output = reactHandler.handler(createEvent(action, target));
+            target.click();
             writeResult({
                 ok: true,
                 action,
-                eventName,
                 targetId: target.id || "",
-                handlerNodeId: reactHandler.node.id || "",
-                propKey: reactHandler.propKey,
-                handlerName: reactHandler.handler.name || "anonymous"
-            });
-
-            Promise.resolve(output).catch(error => {
-                writeResult({
-                    ok: false,
-                    action,
-                    error: String(error?.message || error).slice(0, 200)
-                });
+                method: "native_click"
             });
         } catch (error) {
             writeResult({
