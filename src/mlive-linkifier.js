@@ -603,6 +603,123 @@
             return items.length > 0 ? items.join(" / ") : "内容なし";
         }
 
+        function formatSearchBridgeSavedAt(condition) {
+            const savedAt = Number(condition?.savedAt || 0);
+            const date = new Date(Number.isFinite(savedAt) && savedAt > 0 ? savedAt : Date.now());
+            const month = String(date.getMonth() + 1).padStart(2, "0");
+            const day = String(date.getDate()).padStart(2, "0");
+            const hour = String(date.getHours()).padStart(2, "0");
+            const minute = String(date.getMinutes()).padStart(2, "0");
+            return `${month}/${day} ${hour}:${minute}`;
+        }
+
+        function normalizeSearchBridgeDetailValue(value) {
+            const text = normalizeSearchBridgeText(value);
+            if (!text || /^(?:指定しない|指定なし|未選択|なし|選択してください|-1)$/i.test(text)) return "";
+            return text;
+        }
+
+        function getSearchBridgeConditionSummaryItems(condition) {
+            const raw = Array.isArray(condition?.summary)
+                ? condition.summary
+                : typeof condition?.summary === "string"
+                    ? [condition.summary]
+                    : [];
+
+            return raw
+                .flatMap(value => String(value || "").split(/\s*\/\s*/))
+                .map(value => normalizeSearchBridgeText(value))
+                .filter(Boolean);
+        }
+
+        function getSearchBridgeConditionFieldValues(condition, pattern) {
+            const values = [];
+            const append = value => {
+                const normalized = normalizeSearchBridgeDetailValue(value);
+                if (normalized && !values.includes(normalized)) values.push(normalized);
+            };
+            const matches = value => pattern.test(String(value || ""));
+
+            for (const item of getSearchBridgeConditionSummaryItems(condition)) {
+                const separator = item.search(/[:：]/);
+                if (separator < 0) continue;
+                const label = item.slice(0, separator);
+                if (matches(label)) append(item.slice(separator + 1));
+            }
+
+            if (Array.isArray(condition?.fields)) {
+                for (const record of condition.fields) {
+                    const marker = [record?.key, record?.id, record?.name, record?.label].join(" ");
+                    if (!matches(marker)) continue;
+
+                    const type = String(record?.type || "").toLowerCase();
+                    if ((type === "checkbox" || type === "radio") && !record?.checked) continue;
+                    append(record?.displayValue || record?.selectedValues?.join("/") || record?.value);
+                }
+            } else if (condition?.fields && typeof condition.fields === "object") {
+                for (const [name, rawValues] of Object.entries(condition.fields)) {
+                    if (!matches(name)) continue;
+                    for (const value of Array.isArray(rawValues) ? rawValues : [rawValues]) append(value);
+                }
+            }
+
+            return values;
+        }
+
+        function getSearchBridgeConditionCarName(condition) {
+            const juCars = normalizeJuSelectionCascade(condition?.juSelectionCascade)?.cars || [];
+            const juCar = normalizeSearchBridgeDetailValue(juCars[0]?.car);
+            if (juCar) return juCar;
+
+            const araiCar = Array.isArray(condition?.araiNameCascade?.steps)
+                ? condition.araiNameCascade.steps.find(step => step?.kind === "car")?.label
+                : "";
+            const normalizedAraiCar = normalizeSearchBridgeDetailValue(araiCar);
+            if (normalizedAraiCar) return normalizedAraiCar;
+
+            return getSearchBridgeConditionFieldValues(condition, /(?:車名|car[_\s-]*name|syamei|model)/i)
+                .find(value => !/^\d+$/.test(value)) || "";
+        }
+
+        function getSearchBridgeConditionGradeValues(condition) {
+            const values = [];
+            const append = value => {
+                const normalized = normalizeSearchBridgeDetailValue(value);
+                if (normalized && !values.includes(normalized)) values.push(normalized);
+            };
+
+            for (const car of normalizeJuSelectionCascade(condition?.juSelectionCascade)?.cars || []) {
+                for (const grade of car.grades || []) append(grade);
+            }
+            for (const step of condition?.araiNameCascade?.steps || []) {
+                if (step?.kind === "grade" || step?.kind === "katasiki") append(step.label);
+            }
+            for (const value of getSearchBridgeConditionFieldValues(condition, /(?:グレード|grade|型式|katashiki|katasiki)/i)) {
+                append(value);
+            }
+
+            return values.slice(0, 2);
+        }
+
+        function getSearchBridgeCompactConditionDisplay(condition) {
+            const carName = getSearchBridgeConditionCarName(condition);
+            if (!carName) return null;
+
+            const details = [];
+            const grades = getSearchBridgeConditionGradeValues(condition);
+            const year = getSearchBridgeConditionFieldValues(condition, /(?:年式|nenshiki|(?:^|[_\s-])nen(?:_|$)|year)/i)[0];
+            const mileage = getSearchBridgeConditionFieldValues(condition, /(?:走行|odometer|odo|soko|mileage)/i)[0];
+
+            if (grades.length) details.push(`グレード:${grades.join("/")}`);
+            if (year) details.push(`年式:${year}`);
+            if (mileage) details.push(`走行距離:${mileage}`);
+
+            return {
+                status: `${carName} ${formatSearchBridgeSavedAt(condition)}`,
+                preview: details.join(" / ")
+            };
+        }
+
         function createSearchBridgeSlotNameElement(slot, renameHandler) {
             const label = document.createElement("div");
             label.textContent = normalizeSearchBridgeSlotName(slot.name, slot.id);
@@ -653,19 +770,18 @@
         function formatMLiveSlotStatus(condition) {
             if (!condition) return "空";
 
-            const savedAt = Number(condition.savedAt || 0);
-            const date = new Date(Number.isFinite(savedAt) && savedAt > 0 ? savedAt : Date.now());
-            const month = String(date.getMonth() + 1).padStart(2, "0");
-            const day = String(date.getDate()).padStart(2, "0");
-            const hour = String(date.getHours()).padStart(2, "0");
-            const minute = String(date.getMinutes()).padStart(2, "0");
-            const mode = isMLiveBridgeMode(condition.sourceMode) ? getMLiveModeLabel(condition.sourceMode) : "条件";
+            const compact = getSearchBridgeCompactConditionDisplay(condition);
+            if (compact) return compact.status;
 
-            return `${mode} ${month}/${day} ${hour}:${minute}`;
+            const mode = isMLiveBridgeMode(condition.sourceMode) ? getMLiveModeLabel(condition.sourceMode) : "条件";
+            return `${mode} ${formatSearchBridgeSavedAt(condition)}`;
         }
 
         function getMLiveConditionPreview(condition) {
             if (!condition) return "未保存";
+
+            const compact = getSearchBridgeCompactConditionDisplay(condition);
+            if (compact?.preview) return compact.preview;
 
             const summary = normalizeSearchBridgeSummary(condition.summary);
             if (summary.length > 0) return formatSearchBridgePreview(summary);
@@ -1616,19 +1732,18 @@
         function formatSiteSearchBridgeSlotStatus(adapter, condition) {
             if (!condition) return "空";
 
-            const savedAt = Number(condition.savedAt || 0);
-            const date = new Date(Number.isFinite(savedAt) && savedAt > 0 ? savedAt : Date.now());
-            const month = String(date.getMonth() + 1).padStart(2, "0");
-            const day = String(date.getDate()).padStart(2, "0");
-            const hour = String(date.getHours()).padStart(2, "0");
-            const minute = String(date.getMinutes()).padStart(2, "0");
-            const mode = adapter.getModeLabel(condition.sourceMode) || "条件";
+            const compact = getSearchBridgeCompactConditionDisplay(condition);
+            if (compact) return compact.status;
 
-            return `${mode} ${month}/${day} ${hour}:${minute}`;
+            const mode = adapter.getModeLabel(condition.sourceMode) || "条件";
+            return `${mode} ${formatSearchBridgeSavedAt(condition)}`;
         }
 
         function getSiteSearchBridgeConditionPreview(condition) {
             if (!condition) return "未保存";
+
+            const compact = getSearchBridgeCompactConditionDisplay(condition);
+            if (compact?.preview) return compact.preview;
 
             const summary = normalizeSearchBridgeSummary(condition.summary);
             if (summary.length > 0) return formatSearchBridgePreview(summary);
@@ -5097,7 +5212,7 @@
                 storageKey: JU_SEARCH_BRIDGE_SLOTS_KEY,
                 pendingKey: JU_SEARCH_BRIDGE_PENDING_KEY,
                 uiId: "ju-search-bridge-ui",
-                buildId: "ju-save-readiness-v9-20260711",
+                buildId: "ju-slot-summary-v10-20260711",
                 position: { right: "12px", top: "84px" },
                 launcherStyle: { padding: "10px 14px", fontSize: "13px" },
                 state: siteSearchBridgeState.ju,
