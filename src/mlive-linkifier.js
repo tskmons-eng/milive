@@ -1324,6 +1324,7 @@
         function normalizeJuSelectionCascadeText(value) {
             return normalizeSearchBridgeText(value)
                 .replace(/[\uFF08(]\s*[\d,]+\s*[\uFF09)]\s*$/, "")
+                .trim()
                 .slice(0, 120);
         }
 
